@@ -1,8 +1,8 @@
-# voidmcp
+# VoidMCP
 
 One MCP to orchestrate them all.
 
-voidmcp is a standalone MCP server that gives your AI agent **Code Mode** - the ability to write and execute JavaScript that orchestrates multiple MCP tools in a single sandboxed execution. No round-trips, no token waste, no setup complexity.
+VoidMCP is a standalone MCP server that gives your AI agent **Code Mode** - the ability to write and execute JavaScript that orchestrates multiple MCP tools in a single sandboxed execution. No round-trips, no token waste, no setup complexity.
 
 Add MCPs at runtime. Search across tools. Let your agent write scripts that chain GitHub + Notion + Slack + anything with an MCP server.
 
@@ -15,7 +15,7 @@ When your AI agent has access to 10 MCP servers with 50+ tools, two problems eme
 1. **Token waste** - every tool schema is sent to the LLM on every request
 2. **Round-trip overhead** - chaining 5 tool calls means 5 LLM inference cycles
 
-voidmcp solves both. It exposes a single `execute_code` tool. The LLM writes a JavaScript script that calls multiple tools in one execution. One inference, one sandbox, multiple tool calls.
+VoidMCP solves both. It exposes a single `execute_code` tool. The LLM writes a JavaScript script that calls multiple tools in one execution. One inference, one sandbox, multiple tool calls.
 
 ```javascript
 // One script, three tool calls, zero round-trips
@@ -50,6 +50,7 @@ Add to your `claude_desktop_config.json`:
 {
   "mcpServers": {
     "voidmcp": {
+      "type": "stdio",
       "command": "voidmcp",
       "args": ["serve", "--stdio"]
     }
@@ -59,7 +60,7 @@ Add to your `claude_desktop_config.json`:
 
 ### Cursor / Windsurf
 
-Same config format as Claude Desktop. Point to the voidmcp binary path.
+Same config format. Point to the full voidmcp binary path if it's not in your PATH.
 
 ## Adding MCP servers
 
@@ -83,7 +84,7 @@ voidmcp remove filesystem # unregister a server
 
 ## Tools
 
-voidmcp exposes 5 tools to the LLM:
+VoidMCP exposes 5 tools to the LLM:
 
 | Tool | Description |
 |---|---|
@@ -95,7 +96,7 @@ voidmcp exposes 5 tools to the LLM:
 
 ## How Code Mode works
 
-When the LLM calls `execute_code`, voidmcp:
+When the LLM calls `execute_code`, VoidMCP:
 
 1. Collects all tools from all registered MCP servers
 2. Generates a JavaScript SDK with typed function stubs (`tools.github.create_issue(...)`)
@@ -109,7 +110,7 @@ The sandbox has no access to the host filesystem, network, or environment. Tool 
 
 When you have few tools (default: 20 or fewer), full TypeScript definitions are embedded in the `execute_code` tool description. The LLM sees exactly what's available.
 
-When you have many tools, voidmcp switches to a summary mode and instructs the LLM to use `search("your goal")` first. This keeps token usage flat regardless of how many tools are registered.
+When you have many tools, VoidMCP switches to a summary mode and instructs the LLM to use `search("your goal")` first. This keeps token usage flat regardless of how many tools are registered.
 
 Configure the threshold:
 
