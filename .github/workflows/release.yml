@@ -1,0 +1,58 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  binaries:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Build binaries
+        run: |
+          VERSION=${GITHUB_REF_NAME#v}
+          LDFLAGS="-s -w -X 'main.Version=${VERSION}'"
+          declare -A TARGETS=(
+            ["linux/amd64"]="voidmcp-linux-amd64.tar.gz"
+            ["linux/arm64"]="voidmcp-linux-arm64.tar.gz"
+            ["windows/amd64"]="voidmcp-windows-amd64.zip"
+            ["windows/arm64"]="voidmcp-windows-arm64.zip"
+            ["darwin/amd64"]="voidmcp-darwin-amd64.tar.gz"
+            ["darwin/arm64"]="voidmcp-darwin-arm64.tar.gz"
+          )
+          mkdir -p dist
+          for TARGET in "${!TARGETS[@]}"; do
+            OS="${TARGET%/*}"
+            ARCH="${TARGET#*/}"
+            ARCHIVE="${TARGETS[$TARGET]}"
+            BINARY="voidmcp"
+            if [ "$OS" = "windows" ]; then
+              BINARY="voidmcp.exe"
+            fi
+            BUILDDIR="dist/build-${OS}-${ARCH}"
+            mkdir -p "$BUILDDIR"
+            CGO_ENABLED=0 GOOS="$OS" GOARCH="$ARCH" go build \
+              -ldflags="$LDFLAGS" \
+              -o "$BUILDDIR/$BINARY" ./cmd/voidmcp
+            if [[ "$ARCHIVE" == *.tar.gz ]]; then
+              tar -czf "dist/$ARCHIVE" -C "$BUILDDIR" "$BINARY"
+            else
+              (cd "$BUILDDIR" && zip "../$ARCHIVE" "$BINARY")
+            fi
+          done
+
+      - name: Create release and upload assets
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" --generate-notes 2>/dev/null || true
+          gh release upload "$GITHUB_REF_NAME" dist/*.tar.gz dist/*.zip --clobber
