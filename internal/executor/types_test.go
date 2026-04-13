@@ -184,8 +184,8 @@ func TestGenerateTypeDefs_InvalidJSIdent_ToolName(t *testing.T) {
 
 	got := executor.GenerateTypeDefs(tools, nil)
 
-	// Tool with invalid ident should use comment notation.
-	if !strings.Contains(got, `tools["<server>"]["my-tool"]`) {
+	// Tool with invalid ident should use bracket notation with the actual server name.
+	if !strings.Contains(got, `tools["srv"]["my-tool"]`) {
 		t.Errorf("output should use bracket notation comment for invalid tool ident:\n%s", got)
 	}
 }

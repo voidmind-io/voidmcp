@@ -135,10 +135,10 @@ func (t *HTTPTransport) applyAuth(req *http.Request) {
 	}
 }
 
-// ListTools performs the MCP initialize handshake and then retrieves the
-// server's tool list. It stores the session ID for subsequent calls.
-func (t *HTTPTransport) ListTools(ctx context.Context) ([]protocol.Tool, error) {
-	// Step 1: initialize — establish the session.
+// initialize performs the MCP initialize + notifications/initialized handshake,
+// establishing a new session. It is called at the start of ListTools and by
+// reinitialize when a session has expired.
+func (t *HTTPTransport) initialize(ctx context.Context) error {
 	initReq, err := json.Marshal(map[string]any{
 		"jsonrpc": "2.0",
 		"id":      0,
@@ -150,21 +150,39 @@ func (t *HTTPTransport) ListTools(ctx context.Context) ([]protocol.Tool, error) 
 		},
 	})
 	if err != nil {
-		return nil, fmt.Errorf("marshal initialize: %w", err)
+		return fmt.Errorf("marshal initialize: %w", err)
 	}
 
 	if _, err = t.send(ctx, initReq); err != nil {
-		return nil, fmt.Errorf("initialize: %w", err)
+		return fmt.Errorf("initialize: %w", err)
 	}
 
-	// Step 2: notifications/initialized — fire-and-forget.
+	// notifications/initialized is a fire-and-forget notification; errors are ignored.
 	notifyReq, _ := json.Marshal(map[string]any{
 		"jsonrpc": "2.0",
 		"method":  "notifications/initialized",
 	})
-	_, _ = t.send(ctx, notifyReq) // notification; ignore error
+	_, _ = t.send(ctx, notifyReq)
 
-	// Step 3: tools/list.
+	return nil
+}
+
+// reinitialize clears the current session ID and performs the initialize
+// handshake again. Called automatically on ErrSessionExpired.
+func (t *HTTPTransport) reinitialize(ctx context.Context) error {
+	t.mu.Lock()
+	t.sessionID = ""
+	t.mu.Unlock()
+	return t.initialize(ctx)
+}
+
+// ListTools performs the MCP initialize handshake and then retrieves the
+// server's tool list. It stores the session ID for subsequent calls.
+func (t *HTTPTransport) ListTools(ctx context.Context) ([]protocol.Tool, error) {
+	if err := t.initialize(ctx); err != nil {
+		return nil, err
+	}
+
 	listReq, err := json.Marshal(protocol.Request{
 		JSONRPC: "2.0",
 		ID:      json.RawMessage(`1`),
@@ -199,8 +217,21 @@ func (t *HTTPTransport) ListTools(ctx context.Context) ([]protocol.Tool, error) 
 }
 
 // CallTool invokes the named tool with the given JSON-encoded arguments.
+// If the session has expired (HTTP 404) it re-initializes and retries once.
 // It returns the raw JSON of the tools/call result.
 func (t *HTTPTransport) CallTool(ctx context.Context, name string, args json.RawMessage) (json.RawMessage, error) {
+	result, err := t.callToolOnce(ctx, name, args)
+	if errors.Is(err, ErrSessionExpired) {
+		if initErr := t.reinitialize(ctx); initErr != nil {
+			return nil, fmt.Errorf("session expired and re-init failed: %w", initErr)
+		}
+		return t.callToolOnce(ctx, name, args)
+	}
+	return result, err
+}
+
+// callToolOnce issues a single tools/call request without any retry logic.
+func (t *HTTPTransport) callToolOnce(ctx context.Context, name string, args json.RawMessage) (json.RawMessage, error) {
 	raw, err := json.Marshal(map[string]any{
 		"jsonrpc": "2.0",
 		"id":      2,

@@ -411,10 +411,10 @@ func TestHandle_ExecuteCode_SimpleScript(t *testing.T) {
 	if len(content) == 0 {
 		t.Fatal("execute_code returned empty content")
 	}
-	// The text should contain the Duration line (always present).
+	// The text is JSON-encoded; it must contain duration_ms (always present).
 	text := content[0].(map[string]any)["text"].(string)
-	if !strings.Contains(text, "Duration:") {
-		t.Errorf("execute_code result text = %q, want to contain 'Duration:'", text)
+	if !strings.Contains(text, "duration_ms") {
+		t.Errorf("execute_code result text = %q, want to contain 'duration_ms'", text)
 	}
 }
 
@@ -758,87 +758,8 @@ func TestHandle_ToolsCall_AddMCP_WithURL(t *testing.T) {
 	}
 }
 
-func TestHandle_ToolsCall_AddMCP_WithBearerAuth(t *testing.T) {
-	t.Parallel()
-
-	st := newTestStore(t)
-	reg := registry.New(st, time.Hour)
-	t.Cleanup(func() { reg.Close() })
-
-	var receivedAuth string
-	upstream := mcpStubServer(t, []protocol.Tool{{Name: "t"}})
-
-	// Wrap the stub with auth capture.
-	authUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		receivedAuth = r.Header.Get("Authorization")
-		// Forward to the stub.
-		upstream.Config.Handler.ServeHTTP(w, r)
-	}))
-	t.Cleanup(authUpstream.Close)
-
-	pool := newTestPool(t)
-	exec := executor.New(pool)
-	srv := server.New(reg, exec, nil, server.Config{})
-	msg := `{
-		"jsonrpc":"2.0","id":1,"method":"tools/call",
-		"params":{"name":"add_mcp","arguments":{"name":"authed","url":"` + authUpstream.URL + `","auth_token":"my-token"}}
-	}`
-	resp := handle(t, srv, msg)
-
-	if resp["error"] != nil {
-		t.Fatalf("add_mcp returned RPC error: %v", resp["error"])
-	}
-	result := resp["result"].(map[string]any)
-	if result["isError"] == true {
-		content := result["content"].([]any)
-		text := content[0].(map[string]any)["text"].(string)
-		t.Fatalf("add_mcp returned isError=true: %s", text)
-	}
-
-	if receivedAuth != "Bearer my-token" {
-		t.Errorf("Authorization = %q, want 'Bearer my-token'", receivedAuth)
-	}
-}
-
-func TestHandle_ToolsCall_AddMCP_WithCustomHeader(t *testing.T) {
-	t.Parallel()
-
-	st := newTestStore(t)
-	reg := registry.New(st, time.Hour)
-	t.Cleanup(func() { reg.Close() })
-
-	var receivedHeader string
-	upstream := mcpStubServer(t, []protocol.Tool{{Name: "t"}})
-
-	headerUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		receivedHeader = r.Header.Get("X-Api-Key")
-		upstream.Config.Handler.ServeHTTP(w, r)
-	}))
-	t.Cleanup(headerUpstream.Close)
-
-	pool := newTestPool(t)
-	exec := executor.New(pool)
-	srv := server.New(reg, exec, nil, server.Config{})
-	msg := `{
-		"jsonrpc":"2.0","id":1,"method":"tools/call",
-		"params":{"name":"add_mcp","arguments":{"name":"hdr","url":"` + headerUpstream.URL + `","auth_token":"secret","auth_header":"X-Api-Key"}}
-	}`
-	resp := handle(t, srv, msg)
-
-	if resp["error"] != nil {
-		t.Fatalf("add_mcp returned RPC error: %v", resp["error"])
-	}
-	result := resp["result"].(map[string]any)
-	if result["isError"] == true {
-		content := result["content"].([]any)
-		text := content[0].(map[string]any)["text"].(string)
-		t.Fatalf("add_mcp returned isError=true: %s", text)
-	}
-
-	if receivedHeader != "secret" {
-		t.Errorf("X-Api-Key = %q, want 'secret'", receivedHeader)
-	}
-}
+// Auth token tests removed — auth_token and auth_header are now CLI-only
+// to keep credentials out of the LLM context. See voidmcp add --token.
 
 func TestHandle_ToolsCall_AddMCP_InvalidArguments(t *testing.T) {
 	t.Parallel()
@@ -1070,9 +991,9 @@ func TestHandle_ExecuteCode_WithToolCall(t *testing.T) {
 		t.Fatal("execute_code returned empty content")
 	}
 	text := content[0].(map[string]any)["text"].(string)
-	// Tool calls should be reported in the output.
-	if !strings.Contains(text, "Tool calls:") {
-		t.Errorf("execute_code result = %q, want to contain 'Tool calls:'", text)
+	// The JSON output must include the tool_calls array.
+	if !strings.Contains(text, "tool_calls") {
+		t.Errorf("execute_code result = %q, want to contain 'tool_calls'", text)
 	}
 }
 

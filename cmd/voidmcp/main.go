@@ -56,6 +56,7 @@ func runServe() {
 	port := fs.Int("port", 8090, "HTTP port (ignored when --stdio is set)")
 	stdio := fs.Bool("stdio", false, "Use stdio transport instead of HTTP")
 	noAuth := fs.Bool("no-auth", false, "Disable bearer token auth (use when behind a trusted reverse proxy)")
+	tokenFlag := fs.String("token", "", "Bearer token to use for HTTP auth (default: auto-generate and persist)")
 	dbPath := fs.String("db", defaultDBPath(), "Database path")
 	poolSize := fs.Int("pool-size", 4, "WASM runtime pool size")
 	memLimit := fs.Int("memory", 16, "Per-execution memory limit in MB")
@@ -90,12 +91,42 @@ func runServe() {
 
 	var bearerToken string
 	if !*stdio && !*noAuth {
-		tok, err := server.GenerateToken()
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "error: generate auth token: %v\n", err)
-			os.Exit(1)
+		// Token resolution order: --token flag > VOIDMCP_TOKEN env > persisted > generate new.
+		envToken := os.Getenv("VOIDMCP_TOKEN")
+		switch {
+		case *tokenFlag != "":
+			if len(*tokenFlag) < 32 {
+				fmt.Fprintln(os.Stderr, "error: --token must be at least 32 characters")
+				os.Exit(1)
+			}
+			bearerToken = *tokenFlag
+		case envToken != "":
+			if len(envToken) < 32 {
+				fmt.Fprintln(os.Stderr, "error: VOIDMCP_TOKEN must be at least 32 characters")
+				os.Exit(1)
+			}
+			bearerToken = envToken
+		default:
+			// Try to load a previously persisted token; generate and persist one
+			// if none exists yet.
+			tok, getErr := st.GetSetting(context.Background(), "bearer_token")
+			if getErr == nil {
+				bearerToken = tok
+			} else {
+				tok, err = server.GenerateToken()
+				if err != nil {
+					fmt.Fprintf(os.Stderr, "error: generate auth token: %v\n", err)
+					st.Close()
+					os.Exit(1)
+				}
+				if err = st.SetSetting(context.Background(), "bearer_token", tok); err != nil {
+					fmt.Fprintf(os.Stderr, "error: persist auth token: %v\n", err)
+					st.Close()
+					os.Exit(1)
+				}
+				bearerToken = tok
+			}
 		}
-		bearerToken = tok
 	}
 
 	srv := server.New(reg, exec, st, server.Config{
@@ -283,7 +314,7 @@ func printUsage() {
 	fmt.Fprintln(os.Stderr, `voidmcp - MCP server with WASM tool execution
 
 Usage:
-  voidmcp serve   [--host ADDR] [--port N] [--stdio] [--no-auth] [--db PATH]
+  voidmcp serve   [--host ADDR] [--port N] [--stdio] [--no-auth] [--token T] [--db PATH]
                   [--pool-size N] [--memory MB] [--timeout D]
                   [--max-tool-calls N] [--schema-ttl D]
   voidmcp add     <name> <url-or-command> [--token T] [--header H] [--db PATH]

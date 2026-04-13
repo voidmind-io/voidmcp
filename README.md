@@ -78,11 +78,19 @@ Same config format. Point to the full voidmcp binary path if it's not in your PA
 
 ## Adding MCP servers
 
-Once voidmcp is running, your AI agent can register HTTP MCP servers directly:
+**Public servers (no auth)** - the AI agent can add these directly:
 
 > "Add the weather MCP at https://weather.mcp.example.com"
 
-For local stdio MCP servers (child processes), use the CLI:
+**Servers with authentication** - use the CLI to keep tokens out of the LLM context:
+
+```bash
+voidmcp add github https://mcp.github.com --token ghp_your_token_here
+voidmcp add notion https://mcp.notion.com --token ntn_your_token_here
+voidmcp add myapi https://api.example.com/mcp --token secret --header X-Api-Key
+```
+
+**Local stdio servers** (child processes) - also CLI-only:
 
 ```bash
 voidmcp add filesystem "npx -y @modelcontextprotocol/server-filesystem /home/user/docs"
@@ -168,7 +176,7 @@ Registered servers and their tools persist in SQLite across restarts.
 - **WASM sandbox**: JavaScript runs in QuickJS compiled to WebAssembly. No filesystem, network, or environment access. Runtimes are discarded after each execution.
 - **Localhost only**: HTTP server binds to `127.0.0.1` by default
 - **Bearer auth**: Random 256-bit token generated at startup for HTTP mode
-- **No command injection via LLM**: The `add_mcp` tool only accepts HTTP URLs. Local stdio servers can only be registered via the CLI (direct user action). This prevents prompt injection from triggering arbitrary command execution.
+- **Credentials never touch the LLM**: The `add_mcp` tool only accepts public URLs (no auth). Servers requiring tokens and local stdio servers can only be registered via CLI. This keeps API keys out of the LLM context and prevents prompt injection from triggering arbitrary command execution.
 - **Encrypted credentials**: Auth tokens stored with AES-256-GCM in SQLite. Encryption key at `~/.voidmcp/key` with 0600 permissions.
 - **Restricted child env**: stdio MCP servers receive only PATH, HOME, TMPDIR, LANG from the parent environment
 

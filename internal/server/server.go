@@ -298,14 +298,12 @@ func (s *Server) buildToolList() []protocol.Tool {
 func (s *Server) addMCPTool() protocol.Tool {
 	return protocol.Tool{
 		Name:        "add_mcp",
-		Description: "Register a new HTTP MCP server. Connects to the URL, discovers available tools, and makes them callable via execute_code. After adding, use search() to see the discovered tools. Example: add_mcp(name=\"github\", url=\"https://mcp.github.com\"). For local servers that run as child processes, use the CLI instead: voidmcp add <name> <command>",
+		Description: "Register a public HTTP MCP server (no authentication). Connects to the URL, discovers available tools, and makes them callable via execute_code. After adding, use search() to see the discovered tools. Example: add_mcp(name=\"weather\", url=\"https://weather.mcp.example.com\"). For servers that require authentication or local stdio servers, use the CLI instead: voidmcp add <name> <url> --token <token>",
 		InputSchema: protocol.InputSchema{
 			Type: "object",
 			Properties: map[string]protocol.Property{
-				"name":        {Type: "string", Description: "Alias for this MCP server (e.g. 'github', 'notion')"},
-				"url":         {Type: "string", Description: "MCP server endpoint URL"},
-				"auth_token":  {Type: "string", Description: "Optional Bearer token for authentication"},
-				"auth_header": {Type: "string", Description: "Optional custom auth header name (default: Authorization)"},
+				"name": {Type: "string", Description: "Alias for this MCP server (e.g. 'weather', 'demo')"},
+				"url":  {Type: "string", Description: "MCP server endpoint URL"},
 			},
 			Required: []string{"name", "url"},
 		},
@@ -381,15 +379,14 @@ func (s *Server) handleToolsCall(ctx context.Context, params json.RawMessage) (a
 	}
 }
 
-// handleAddMCP registers a new HTTP MCP server. stdio MCPs (local commands)
-// are only registerable via the CLI to prevent prompt injection attacks from
-// triggering arbitrary command execution.
+// handleAddMCP registers a public HTTP MCP server (no authentication).
+// Servers requiring auth tokens must be added via CLI to keep credentials
+// out of the LLM context. stdio MCPs are also CLI-only to prevent prompt
+// injection from triggering arbitrary command execution.
 func (s *Server) handleAddMCP(ctx context.Context, raw json.RawMessage) *protocol.ToolResult {
 	var args struct {
-		Name       string `json:"name"`
-		URL        string `json:"url"`
-		AuthToken  string `json:"auth_token"`
-		AuthHeader string `json:"auth_header"`
+		Name string `json:"name"`
+		URL  string `json:"url"`
 	}
 	if err := json.Unmarshal(raw, &args); err != nil {
 		return protocol.ErrorResult("invalid arguments: " + err.Error())
@@ -398,25 +395,21 @@ func (s *Server) handleAddMCP(ctx context.Context, raw json.RawMessage) *protoco
 		return protocol.ErrorResult("name is required")
 	}
 	if args.URL == "" {
-		return protocol.ErrorResult("url is required (stdio MCPs can only be added via CLI: voidmcp add <name> <command>)")
+		return protocol.ErrorResult("url is required. For servers requiring authentication, use the CLI: voidmcp add <name> <url> --token <token>")
 	}
 
 	srv := store.MCPServer{
 		Name: args.Name,
 		URL:  args.URL,
 	}
-	if args.AuthToken != "" {
-		srv.AuthType = "bearer"
-		srv.AuthToken = args.AuthToken
-		if args.AuthHeader != "" {
-			srv.AuthType = "header"
-			srv.AuthHeader = args.AuthHeader
-		}
-	}
 
 	tools, err := s.registry.Add(ctx, srv)
 	if err != nil {
-		return protocol.ErrorResult(fmt.Sprintf("failed to add server %q: %s", args.Name, err.Error()))
+		errMsg := fmt.Sprintf("failed to add server %q: %s", args.Name, err.Error())
+		if strings.Contains(err.Error(), "HTTP 401") || strings.Contains(err.Error(), "HTTP 403") {
+			errMsg += "\n\nThis server requires authentication. Ask the user to add it via CLI:\n  voidmcp add " + args.Name + " " + args.URL + " --token <token>"
+		}
+		return protocol.ErrorResult(errMsg)
 	}
 
 	var sb strings.Builder
@@ -445,24 +438,29 @@ func (s *Server) handleRemoveMCP(ctx context.Context, raw json.RawMessage) *prot
 	return protocol.TextResult(fmt.Sprintf("Removed server %q.", args.Name))
 }
 
-// handleListMCPs returns all registered servers as a JSON text result.
+// handleListMCPs returns all registered servers as a JSON text result,
+// including the name of every tool each server exposes.
 func (s *Server) handleListMCPs(_ context.Context) *protocol.ToolResult {
 	servers := s.registry.List()
 	type serverSummary struct {
-		Name      string `json:"name"`
-		URL       string `json:"url,omitempty"`
-		Command   string `json:"command,omitempty"`
-		Status    string `json:"status"`
-		ToolCount int    `json:"tool_count"`
+		Name    string   `json:"name"`
+		URL     string   `json:"url,omitempty"`
+		Command string   `json:"command,omitempty"`
+		Status  string   `json:"status"`
+		Tools   []string `json:"tools"`
 	}
 	summaries := make([]serverSummary, len(servers))
 	for i, srv := range servers {
+		toolNames := make([]string, len(srv.Tools))
+		for j, t := range srv.Tools {
+			toolNames[j] = t.Name
+		}
 		summaries[i] = serverSummary{
-			Name:      srv.Name,
-			URL:       srv.URL,
-			Command:   srv.Command,
-			Status:    srv.Status,
-			ToolCount: len(srv.Tools),
+			Name:    srv.Name,
+			URL:     srv.URL,
+			Command: srv.Command,
+			Status:  srv.Status,
+			Tools:   toolNames,
 		}
 	}
 	out, err := json.MarshalIndent(summaries, "", "  ")
@@ -485,7 +483,7 @@ func (s *Server) handleSearch(_ context.Context, raw json.RawMessage) *protocol.
 		return protocol.ErrorResult("query is required")
 	}
 
-	results := s.registry.Search(args.Query, 10)
+	results := s.registry.Search(args.Query, 50)
 	if len(results) == 0 {
 		return protocol.TextResult(fmt.Sprintf("No tools found matching %q.", args.Query))
 	}
@@ -510,6 +508,15 @@ func (s *Server) handleSearch(_ context.Context, raw json.RawMessage) *protocol.
 	var sb strings.Builder
 	fmt.Fprintf(&sb, "Found %d tool(s) matching %q:\n\n", len(results), args.Query)
 	sb.WriteString(executor.GenerateTypeDefs(matched, outputSchemas))
+
+	// When browsing all tools, indicate if results were truncated.
+	if args.Query == "*" {
+		totalTools := s.registry.TotalToolCount()
+		if len(results) < totalTools {
+			fmt.Fprintf(&sb, "\n(showing %d of %d tools)\n", len(results), totalTools)
+		}
+	}
+
 	return protocol.TextResult(sb.String())
 }
 
@@ -558,32 +565,33 @@ func (s *Server) handleExecuteCode(ctx context.Context, raw json.RawMessage) *pr
 		return protocol.ErrorResult("executor error: " + err.Error())
 	}
 
-	var sb strings.Builder
-	if result.Error != "" {
-		fmt.Fprintf(&sb, "Error: %s\n", result.Error)
+	// executeCodeResponse is the structured output returned to the LLM.
+	// It contains both the result value and execution metadata so the LLM
+	// can parse either the result directly or inspect logs and tool call traces.
+	type executeCodeResponse struct {
+		Result     json.RawMessage        `json:"result,omitempty"`
+		Error      string                 `json:"error,omitempty"`
+		Logs       []executor.LogEntry    `json:"logs,omitempty"`
+		ToolCalls  []executor.ToolCallLog `json:"tool_calls,omitempty"`
+		DurationMS int64                  `json:"duration_ms"`
 	}
-	if result.Result != nil {
-		fmt.Fprintf(&sb, "Result: %s\n", string(result.Result))
-	}
-	if len(result.Logs) > 0 {
-		sb.WriteString("\nLogs:\n")
-		for _, l := range result.Logs {
-			fmt.Fprintf(&sb, "  [%s] %s\n", l.Level, l.Message)
-		}
-	}
-	if len(result.ToolCalls) > 0 {
-		fmt.Fprintf(&sb, "\nTool calls: %d (%.0fms total)\n", len(result.ToolCalls), float64(result.DurationMS))
-		for _, tc := range result.ToolCalls {
-			fmt.Fprintf(&sb, "  - %s/%s: %s (%dms)\n", tc.Server, tc.Tool, tc.Status, tc.DurationMS)
-		}
-	}
-	fmt.Fprintf(&sb, "\nDuration: %dms", result.DurationMS)
 
-	text := strings.TrimSpace(sb.String())
-	if result.Error != "" {
-		return protocol.ErrorResult(text)
+	resp := executeCodeResponse{
+		Result:     result.Result,
+		Error:      result.Error,
+		Logs:       result.Logs,
+		ToolCalls:  result.ToolCalls,
+		DurationMS: result.DurationMS,
 	}
-	return protocol.TextResult(text)
+	respJSON, jsonErr := json.Marshal(resp)
+	if jsonErr != nil {
+		return protocol.ErrorResult("marshal result: " + jsonErr.Error())
+	}
+
+	if result.Error != "" {
+		return protocol.ErrorResult(string(respJSON))
+	}
+	return protocol.TextResult(string(respJSON))
 }
 
 // marshalResponse encodes a JSON-RPC 2.0 response. If respErr is non-nil it

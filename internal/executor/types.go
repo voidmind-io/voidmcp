@@ -48,33 +48,35 @@ func GenerateTypeDefs(serverTools map[string][]protocol.Tool, outputSchemas map[
 			sb.WriteByte('\n')
 		}
 
-		alias := server
+		sorted := sortedTools(tools)
+
 		if isValidJSIdent(server) {
 			sb.WriteString("declare namespace tools.")
 			sb.WriteString(server)
 			sb.WriteString(" {\n")
-		} else {
-			// Fall back to a bracket-notation comment for aliases with
-			// special characters that would break the namespace syntax.
-			sb.WriteString("// tools[\"")
-			sb.WriteString(server)
-			sb.WriteString("\"]\ndeclare namespace tools_")
-			sb.WriteString(sanitizeIdent(server))
-			sb.WriteString(" {\n")
-		}
-
-		sorted := sortedTools(tools)
-		for _, t := range sorted {
-			var outSchema json.RawMessage
-			if outputSchemas != nil {
-				if schemas, ok := outputSchemas[alias]; ok {
-					outSchema = schemas[t.Name]
+			for _, t := range sorted {
+				var outSchema json.RawMessage
+				if outputSchemas != nil {
+					if schemas, ok := outputSchemas[server]; ok {
+						outSchema = schemas[t.Name]
+					}
 				}
+				writeToolDecl(&sb, t, outSchema, server)
 			}
-			writeToolDecl(&sb, t, outSchema)
+			sb.WriteString("}")
+		} else {
+			// Server alias is not a valid JS identifier — emit all tools as
+			// bracket-notation comments so the LLM sees the correct call syntax.
+			for _, t := range sorted {
+				var outSchema json.RawMessage
+				if outputSchemas != nil {
+					if schemas, ok := outputSchemas[server]; ok {
+						outSchema = schemas[t.Name]
+					}
+				}
+				writeToolDecl(&sb, t, outSchema, server)
+			}
 		}
-
-		sb.WriteString("}")
 	}
 	return sb.String()
 }
@@ -128,15 +130,57 @@ func GenerateServerSummaries(serverTools map[string][]protocol.Tool) string {
 }
 
 // writeToolDecl writes a single TypeScript function declaration into sb.
+// serverName is the owning server alias; when it is not a valid JS identifier
+// all tools for that server are emitted as bracket-notation comments.
 // outSchema is an optional inferred JSON Schema for the return type; when nil
 // the return type falls back to Promise<any>.
-func writeToolDecl(sb *strings.Builder, tool protocol.Tool, outSchema json.RawMessage) {
-	if !isValidJSIdent(tool.Name) {
-		// Emit a comment — the LLM knows the tool exists but cannot call it
-		// via dot-notation syntax.
-		sb.WriteString("  // tools[\"<server>\"][\"")
-		sb.WriteString(strings.ReplaceAll(tool.Name, "\"", "\\\""))
-		sb.WriteString("\"](args)\n")
+func writeToolDecl(sb *strings.Builder, tool protocol.Tool, outSchema json.RawMessage, serverName string) {
+	serverInvalid := !isValidJSIdent(serverName)
+	toolInvalid := !isValidJSIdent(tool.Name)
+
+	if serverInvalid || toolInvalid {
+		// Emit a bracket-notation comment showing the exact call syntax the
+		// WASM proxy supports at runtime.
+		retType := "Promise<any>"
+		if outSchema != nil {
+			retType = "Promise<" + schemaToTypeScript(outSchema) + ">"
+		}
+		escapedServer := strings.ReplaceAll(serverName, "\"", "\\\"")
+		escapedTool := strings.ReplaceAll(tool.Name, "\"", "\\\"")
+		sb.WriteString("// tools[\"")
+		sb.WriteString(escapedServer)
+		sb.WriteString("\"][\"")
+		sb.WriteString(escapedTool)
+		sb.WriteString("\"](args: {")
+
+		props := tool.InputSchema.Properties
+		if len(props) > 0 {
+			required := make(map[string]bool, len(tool.InputSchema.Required))
+			for _, r := range tool.InputSchema.Required {
+				required[r] = true
+			}
+			names := make([]string, 0, len(props))
+			for name := range props {
+				names = append(names, name)
+			}
+			sort.Strings(names)
+			parts := make([]string, 0, len(names))
+			for _, name := range names {
+				prop := props[name]
+				opt := ""
+				if !required[name] {
+					opt = "?"
+				}
+				parts = append(parts, name+opt+": "+tsType(prop))
+			}
+			sb.WriteString(" ")
+			sb.WriteString(strings.Join(parts, "; "))
+			sb.WriteString(" ")
+		}
+
+		sb.WriteString("}): ")
+		sb.WriteString(retType)
+		sb.WriteString(";\n")
 		return
 	}
 
@@ -300,20 +344,6 @@ func isValidJSIdent(s string) bool {
 		return false
 	}
 	return true
-}
-
-// sanitizeIdent replaces non-alphanumeric, non-underscore characters with
-// underscores to produce a valid JS identifier from an arbitrary string.
-func sanitizeIdent(s string) string {
-	var sb strings.Builder
-	for _, r := range s {
-		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '_' {
-			sb.WriteRune(r)
-		} else {
-			sb.WriteRune('_')
-		}
-	}
-	return sb.String()
 }
 
 // truncateDescription returns the first sentence of desc. A sentence boundary

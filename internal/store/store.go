@@ -54,6 +54,11 @@ CREATE TABLE IF NOT EXISTS output_schemas (
     PRIMARY KEY (server_name, tool_name),
     FOREIGN KEY (server_name) REFERENCES mcp_servers(name) ON DELETE CASCADE
 );
+
+CREATE TABLE IF NOT EXISTS settings (
+    key   TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
 `
 
 // Store is the voidmcp configuration store. It wraps a SQLite database and an
@@ -363,6 +368,48 @@ func (s *Store) IsOutputSchemaStale(ctx context.Context, serverName, toolName st
 	}
 	inferredAt, _ := time.Parse("2006-01-02 15:04:05", inferredAtStr)
 	return time.Since(inferredAt) > maxAge
+}
+
+// GetSetting retrieves a named setting from the settings table.
+// Returns ErrNotFound if the key does not exist.
+func (s *Store) GetSetting(ctx context.Context, key string) (string, error) {
+	var value string
+	err := s.db.QueryRowContext(ctx,
+		`SELECT value FROM settings WHERE key = ?`, key,
+	).Scan(&value)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", fmt.Errorf("store: get setting %q: %w", key, ErrNotFound)
+	}
+	if err != nil {
+		return "", fmt.Errorf("store: get setting %q: %w", key, err)
+	}
+	decrypted, decErr := decrypt(value, s.encKey, settingAAD(key))
+	if decErr != nil {
+		return "", fmt.Errorf("store: get setting %q: decrypt: %w", key, decErr)
+	}
+	return decrypted, nil
+}
+
+// SetSetting stores a named setting, replacing any existing value.
+// The value is encrypted at rest using AES-256-GCM with key-specific AAD.
+func (s *Store) SetSetting(ctx context.Context, key, value string) error {
+	enc, err := encrypt(value, s.encKey, settingAAD(key))
+	if err != nil {
+		return fmt.Errorf("store: set setting %q: encrypt: %w", key, err)
+	}
+	_, err = s.db.ExecContext(ctx,
+		`INSERT INTO settings (key, value) VALUES (?, ?)
+		 ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
+		key, enc,
+	)
+	if err != nil {
+		return fmt.Errorf("store: set setting %q: %w", key, err)
+	}
+	return nil
+}
+
+func settingAAD(key string) []byte {
+	return []byte("setting:" + key)
 }
 
 // serverAAD returns the additional authenticated data bound to a server's
