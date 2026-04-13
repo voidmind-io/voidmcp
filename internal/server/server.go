@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/voidmind-io/voidmcp/internal/executor"
@@ -60,6 +61,10 @@ type Server struct {
 	executor *executor.Executor
 	store    *store.Store
 	cfg      Config
+
+	// notifyMu guards stdioWriter. Only used in stdio mode.
+	notifyMu    sync.Mutex
+	stdioWriter io.Writer // set by ServeStdio; nil in HTTP mode
 }
 
 // New creates a new Server backed by the given Registry, Executor, and Store.
@@ -176,6 +181,10 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 // ServeStdio runs the server over stdin/stdout using newline-delimited
 // JSON-RPC. It blocks until ctx is cancelled or stdin is closed.
 func (s *Server) ServeStdio(ctx context.Context) {
+	s.notifyMu.Lock()
+	s.stdioWriter = os.Stdout
+	s.notifyMu.Unlock()
+
 	scanner := bufio.NewScanner(os.Stdin)
 	scanner.Buffer(make([]byte, 10<<20), 10<<20)
 
@@ -188,10 +197,31 @@ func (s *Server) ServeStdio(ctx context.Context) {
 
 		resp := s.Handle(ctx, scanner.Bytes())
 		if resp != nil {
+			s.notifyMu.Lock()
 			_, _ = os.Stdout.Write(resp)
 			_, _ = os.Stdout.Write([]byte("\n"))
+			s.notifyMu.Unlock()
 		}
 	}
+}
+
+// sendNotification sends a JSON-RPC notification to the client. In stdio mode
+// it writes directly to stdout. In HTTP mode this is a no-op (clients re-fetch
+// tools/list on their own schedule).
+func (s *Server) sendNotification(method string) {
+	s.notifyMu.Lock()
+	defer s.notifyMu.Unlock()
+
+	if s.stdioWriter == nil {
+		return
+	}
+
+	msg, _ := json.Marshal(protocol.Request{
+		JSONRPC: "2.0",
+		Method:  method,
+	})
+	_, _ = s.stdioWriter.Write(msg)
+	_, _ = s.stdioWriter.Write([]byte("\n"))
 }
 
 // handleInitialize returns the server identity and capability advertisement.
@@ -522,7 +552,11 @@ func (s *Server) handleExecuteCode(ctx context.Context, raw json.RawMessage) *pr
 			if st.IsOutputSchemaStale(context.Background(), serverName, toolName, schemaTTL) {
 				schema := executor.InferSchema(result)
 				if schema != nil {
-					_ = st.SaveOutputSchema(context.Background(), serverName, toolName, schema)
+					if err := st.SaveOutputSchema(context.Background(), serverName, toolName, schema); err == nil {
+						// Tell the client that the tool list has changed so it
+						// re-fetches tools/list and sees the inferred return types.
+						s.sendNotification("notifications/tools/list_changed")
+					}
 				}
 			}
 		}
