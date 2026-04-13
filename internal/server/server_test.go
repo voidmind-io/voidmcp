@@ -53,7 +53,7 @@ func newTestServer(t *testing.T) *server.Server {
 	exec := executor.New(pool)
 
 	return server.New(reg, exec, nil, server.Config{
-		SchemaThreshold: 20,
+		
 		MaxToolCalls:    10,
 	})
 }
@@ -200,33 +200,21 @@ func TestHandle_ToolsList_ReturnsFiveTools(t *testing.T) {
 	}
 }
 
-func TestHandle_ToolsList_ExecuteCodeDescHasTypeDefsWhenBelowThreshold(t *testing.T) {
+func TestHandle_ToolsList_ExecuteCodeDescSearchFirst(t *testing.T) {
 	t.Parallel()
 
 	st := newTestStore(t)
 	reg := registry.New(st, time.Hour)
 	t.Cleanup(func() { reg.Close() })
 
-	// Register an MCP server so execute_code gets TypeScript defs.
 	upstream := mcpStubServer(t, []protocol.Tool{
-		{
-			Name:        "get_data",
-			Description: "Get some data",
-			InputSchema: protocol.InputSchema{
-				Type:       "object",
-				Properties: map[string]protocol.Property{"key": {Type: "string"}},
-				Required:   []string{"key"},
-			},
-		},
+		{Name: "get_data", Description: "Get some data"},
 	})
 	reg.Add(context.Background(), store.MCPServer{Name: "myapi", URL: upstream.URL}) //nolint:errcheck
 
 	pool := newTestPool(t)
 	exec := executor.New(pool)
-
-	// SchemaThreshold = -1 → always inline full TypeScript defs.
-	srv := server.New(reg, exec, nil, server.Config{SchemaThreshold: -1})
-
+	srv := server.New(reg, exec, nil, server.Config{})
 	resp := handle(t, srv, `{"jsonrpc":"2.0","id":1,"method":"tools/list"}`)
 	result := resp["result"].(map[string]any)
 	toolsRaw := result["tools"].([]any)
@@ -239,46 +227,16 @@ func TestHandle_ToolsList_ExecuteCodeDescHasTypeDefsWhenBelowThreshold(t *testin
 		}
 	}
 
-	if !strings.Contains(execDesc, "declare namespace") {
-		t.Errorf("execute_code description missing TypeScript defs (threshold=-1):\n%s", execDesc)
-	}
-}
-
-func TestHandle_ToolsList_ExecuteCodeDescUseSummaryWhenAboveThreshold(t *testing.T) {
-	t.Parallel()
-
-	st := newTestStore(t)
-	reg := registry.New(st, time.Hour)
-	t.Cleanup(func() { reg.Close() })
-
-	// Register one server with some tools.
-	tools := make([]protocol.Tool, 5)
-	for i := range tools {
-		tools[i] = protocol.Tool{Name: "tool_" + string(rune('a'+i))}
-	}
-	upstream := mcpStubServer(t, tools)
-	reg.Add(context.Background(), store.MCPServer{Name: "srv", URL: upstream.URL}) //nolint:errcheck
-
-	pool := newTestPool(t)
-	exec := executor.New(pool)
-
-	// SchemaThreshold = 0 → always search-first summary mode.
-	srv := server.New(reg, exec, nil, server.Config{SchemaThreshold: 0})
-
-	resp := handle(t, srv, `{"jsonrpc":"2.0","id":1,"method":"tools/list"}`)
-	result := resp["result"].(map[string]any)
-	toolsRaw := result["tools"].([]any)
-
-	var execDesc string
-	for _, tRaw := range toolsRaw {
-		tool := tRaw.(map[string]any)
-		if tool["name"] == "execute_code" {
-			execDesc = tool["description"].(string)
-		}
-	}
-
+	// execute_code should always use search-first mode (no inline TypeScript defs).
 	if strings.Contains(execDesc, "declare namespace") {
-		t.Errorf("execute_code description should use summary mode (threshold=0), but has TypeScript defs:\n%s", execDesc)
+		t.Errorf("execute_code should not inline TypeScript defs, got:\n%s", execDesc)
+	}
+	if !strings.Contains(execDesc, "search") {
+		t.Errorf("execute_code description should reference search(), got:\n%s", execDesc)
+	}
+	// Server summaries should be present.
+	if !strings.Contains(execDesc, "myapi") {
+		t.Errorf("execute_code description should list registered server 'myapi', got:\n%s", execDesc)
 	}
 	if !strings.Contains(execDesc, "tools") {
 		t.Errorf("execute_code description missing summary info:\n%s", execDesc)
@@ -772,8 +730,7 @@ func TestHandle_ToolsCall_AddMCP_WithURL(t *testing.T) {
 
 	pool := newTestPool(t)
 	exec := executor.New(pool)
-	srv := server.New(reg, exec, nil, server.Config{SchemaThreshold: 20})
-
+	srv := server.New(reg, exec, nil, server.Config{})
 	msg := `{
 		"jsonrpc":"2.0","id":1,"method":"tools/call",
 		"params":{"name":"add_mcp","arguments":{"name":"mymcp","url":"` + upstream.URL + `"}}
@@ -821,8 +778,7 @@ func TestHandle_ToolsCall_AddMCP_WithBearerAuth(t *testing.T) {
 
 	pool := newTestPool(t)
 	exec := executor.New(pool)
-	srv := server.New(reg, exec, nil, server.Config{SchemaThreshold: 20})
-
+	srv := server.New(reg, exec, nil, server.Config{})
 	msg := `{
 		"jsonrpc":"2.0","id":1,"method":"tools/call",
 		"params":{"name":"add_mcp","arguments":{"name":"authed","url":"` + authUpstream.URL + `","auth_token":"my-token"}}
@@ -862,8 +818,7 @@ func TestHandle_ToolsCall_AddMCP_WithCustomHeader(t *testing.T) {
 
 	pool := newTestPool(t)
 	exec := executor.New(pool)
-	srv := server.New(reg, exec, nil, server.Config{SchemaThreshold: 20})
-
+	srv := server.New(reg, exec, nil, server.Config{})
 	msg := `{
 		"jsonrpc":"2.0","id":1,"method":"tools/call",
 		"params":{"name":"add_mcp","arguments":{"name":"hdr","url":"` + headerUpstream.URL + `","auth_token":"secret","auth_header":"X-Api-Key"}}
@@ -934,8 +889,7 @@ func TestHandle_ToolsCall_RemoveMCP_HappyPath(t *testing.T) {
 
 	pool := newTestPool(t)
 	exec := executor.New(pool)
-	srv := server.New(reg, exec, nil, server.Config{SchemaThreshold: 20})
-
+	srv := server.New(reg, exec, nil, server.Config{})
 	// First add it.
 	addMsg := `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"add_mcp","arguments":{"name":"todel","url":"` + upstream.URL + `"}}}`
 	addResp := handle(t, srv, addMsg)
@@ -1010,8 +964,7 @@ func TestHandle_ToolsCall_Search_WithResults(t *testing.T) {
 
 	pool := newTestPool(t)
 	exec := executor.New(pool)
-	srv := server.New(reg, exec, nil, server.Config{SchemaThreshold: 20})
-
+	srv := server.New(reg, exec, nil, server.Config{})
 	resp := handle(t, srv, `{
 		"jsonrpc":"2.0","id":1,"method":"tools/call",
 		"params":{"name":"search","arguments":{"query":"search"}}
@@ -1065,8 +1018,7 @@ func TestHandle_ToolsCall_ListMCPs_WithServers(t *testing.T) {
 
 	pool := newTestPool(t)
 	exec := executor.New(pool)
-	srv := server.New(reg, exec, nil, server.Config{SchemaThreshold: 20})
-
+	srv := server.New(reg, exec, nil, server.Config{})
 	resp := handle(t, srv, `{
 		"jsonrpc":"2.0","id":1,"method":"tools/call",
 		"params":{"name":"list_mcps","arguments":{}}
@@ -1102,8 +1054,7 @@ func TestHandle_ExecuteCode_WithToolCall(t *testing.T) {
 
 	pool := newTestPool(t)
 	exec := executor.New(pool)
-	srv := server.New(reg, exec, nil, server.Config{SchemaThreshold: 20, MaxToolCalls: 5})
-
+	srv := server.New(reg, exec, nil, server.Config{MaxToolCalls: 5})
 	resp := handle(t, srv, `{
 		"jsonrpc":"2.0","id":1,"method":"tools/call",
 		"params":{"name":"execute_code","arguments":{"code":"await tools.testsrv.ping({});"}}

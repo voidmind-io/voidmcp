@@ -110,29 +110,29 @@ VoidMCP exposes 5 tools to the LLM:
 
 ## How Code Mode works
 
-When the LLM calls `execute_code`, VoidMCP:
+The workflow is always: **search first, then execute**.
 
-1. Collects all tools from all registered MCP servers
-2. Generates a JavaScript SDK with typed function stubs (`tools.github.create_issue(...)`)
-3. Injects the SDK into a WASM-sandboxed QuickJS runtime
-4. Executes the user's script with `await` support
-5. Returns the result, console logs, and a summary of all tool calls made
+1. The LLM calls `search("your goal")` to discover relevant tools with full TypeScript signatures
+2. The LLM calls `execute_code` with JavaScript that chains the discovered tools
+3. VoidMCP injects tool bindings into a WASM-sandboxed QuickJS runtime
+4. The script runs with `await` support, calling tools across multiple servers
+5. VoidMCP returns the result, console logs, and a summary of all tool calls made
 
 The sandbox has no access to the host filesystem, network, or environment. Tool calls go through a Go bridge that routes to the correct MCP transport.
 
-### Schema threshold
+### Schema inference
 
-When you have few tools (default: 20 or fewer), full TypeScript definitions are embedded in the `execute_code` tool description. The LLM sees exactly what's available.
+The first time a tool is called, VoidMCP captures the response and infers its return type. On subsequent `search` calls, the TypeScript definitions show concrete return types instead of `Promise<any>`:
 
-When you have many tools, VoidMCP switches to a summary mode and instructs the LLM to use `search("your goal")` first. This keeps token usage flat regardless of how many tools are registered.
+```typescript
+// Before first call:
+function read_query(args: { query: string }): Promise<any>;
 
-Configure the threshold:
-
-```bash
-voidmcp serve --stdio --schema-threshold 30   # inline up to 30 tools
-voidmcp serve --stdio --schema-threshold 0    # always use search-first
-voidmcp serve --stdio --schema-threshold -1   # always inline everything
+// After first call:
+function read_query(args: { query: string }): Promise<Array<{ id: number; name: string; email: string }>>;
 ```
+
+Inferred schemas are stored in SQLite and refresh after 7 days (configurable via `--schema-ttl`).
 
 ## HTTP mode
 
@@ -159,7 +159,6 @@ voidmcp serve [flags]
   --memory int         Per-execution memory limit in MB (default: 16)
   --timeout duration   Per-execution timeout (default: 30s)
   --max-tool-calls int Maximum tool calls per execution (default: 50)
-  --schema-threshold int  Tools before switching to search-first mode (default: 20)
 ```
 
 Registered servers and their tools persist in SQLite across restarts.

@@ -61,7 +61,6 @@ func runServe() {
 	memLimit := fs.Int("memory", 16, "Per-execution memory limit in MB")
 	timeout := fs.Duration("timeout", 30*time.Second, "Per-execution timeout")
 	maxToolCalls := fs.Int("max-tool-calls", 50, "Maximum tool calls per execution")
-	threshold := fs.Int("schema-threshold", 20, "Max tools before switching to search-first mode (-1=always inline, 0=always search)")
 	schemaTTL := fs.Duration("schema-ttl", 168*time.Hour, "How often to re-infer output schemas (default: 7 days)")
 	if err := fs.Parse(os.Args[2:]); err != nil {
 		fmt.Fprintln(os.Stderr, err)
@@ -100,7 +99,7 @@ func runServe() {
 	}
 
 	srv := server.New(reg, exec, st, server.Config{
-		SchemaThreshold: *threshold,
+		
 		PoolSize:        *poolSize,
 		MemoryLimitMB:   *memLimit,
 		Timeout:         *timeout,
@@ -286,7 +285,7 @@ func printUsage() {
 Usage:
   voidmcp serve   [--host ADDR] [--port N] [--stdio] [--no-auth] [--db PATH]
                   [--pool-size N] [--memory MB] [--timeout D]
-                  [--max-tool-calls N] [--schema-threshold N] [--schema-ttl D]
+                  [--max-tool-calls N] [--schema-ttl D]
   voidmcp add     <name> <url-or-command> [--token T] [--header H] [--db PATH]
   voidmcp remove  <name> [--db PATH]
   voidmcp list    [--db PATH]

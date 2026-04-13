@@ -252,27 +252,39 @@ func (r *Registry) TotalToolCount() int {
 //   - 100: exact name match
 //   - 90:  name has query as prefix
 //   - 80:  name contains query
-//   - 50:  description contains query
+//   - 70:  server name contains query (all tools from that server)
+//   - 50:  description contains query / browse-all mode
 func (r *Registry) Search(query string, limit int) []SearchResult {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 
-	q := strings.ToLower(query)
+	q := strings.ToLower(strings.TrimSpace(query))
 	var results []SearchResult
 
+	// Empty query or "*" returns all tools (browse mode).
+	browseAll := q == "" || q == "*"
+
 	for server, tools := range r.tools {
+		serverLower := strings.ToLower(server)
+		// If query matches a server name, return ALL tools from that server.
+		serverMatch := !browseAll && (serverLower == q || strings.Contains(serverLower, q))
+
 		for _, t := range tools {
 			nameLower := strings.ToLower(t.Name)
 			descLower := strings.ToLower(t.Description)
 
 			score := 0
 			switch {
+			case browseAll:
+				score = 50 // return everything
 			case nameLower == q:
 				score = 100
 			case strings.HasPrefix(nameLower, q):
 				score = 90
 			case strings.Contains(nameLower, q):
 				score = 80
+			case serverMatch:
+				score = 70 // server name match — return all tools from this server
 			case strings.Contains(descLower, q):
 				score = 50
 			}

@@ -28,11 +28,6 @@ var Version = "dev"
 
 // Config holds tunable parameters for the Server.
 type Config struct {
-	// SchemaThreshold controls how execute_code describes available tools.
-	// -1 = always inline full TypeScript defs.
-	//  0 = always use search-first summary mode.
-	//  N = inline when total tool count <= N, otherwise summary mode.
-	SchemaThreshold int
 	// PoolSize is the number of WASM runtimes kept in the executor pool.
 	PoolSize int
 	// MemoryLimitMB is the per-execution memory limit in megabytes.
@@ -244,52 +239,37 @@ func (s *Server) handleToolsList() any {
 	return map[string]any{"tools": s.buildToolList()}
 }
 
-// buildToolList constructs the 5 built-in tool definitions. execute_code's
-// description adapts to the configured SchemaThreshold and current tool count.
+// buildToolList constructs the 5 built-in tool definitions.
 func (s *Server) buildToolList() []protocol.Tool {
 	allTools := s.registry.AllTools()
-	totalCount := s.registry.TotalToolCount()
 
-	// Load inferred output schemas for all servers so TypeScript defs can show
-	// concrete return types instead of Promise<any>.
-	outputSchemas := make(map[string]map[string]json.RawMessage)
-	if s.store != nil {
-		for serverName := range allTools {
-			schemas, _, _ := s.store.GetAllOutputSchemas(context.Background(), serverName, s.cfg.SchemaTTL)
-			if len(schemas) > 0 {
-				outputSchemas[serverName] = schemas
-			}
-		}
-	}
+	// Build a short server summary so the LLM knows what's available at a glance.
+	summaries := executor.GenerateServerSummaries(allTools)
 
-	const codeIntro = "Execute JavaScript that chains multiple MCP tool calls in a single turn. " +
-		"Use this instead of calling tools individually - pass output from one tool as input to the next. " +
-		"All calls return Promises (use await). Tool results are plain objects you can destructure and pass along.\n\n" +
-		"Example:\n" +
+	codeDesc := "Execute JavaScript that chains multiple MCP tool calls in a single turn. " +
+		"Use this instead of calling tools individually - pass output from one tool as input to the next.\n\n" +
+		"WORKFLOW: Always call search() first, then execute_code.\n\n" +
+		"Step 1 - search(\"your goal\") returns TypeScript signatures like:\n" +
+		"  tools.sqlite.read_query(args: { query: string }): Promise<Array<{ id: number; name: string }>>\n" +
+		"  tools.sqlite.write_query(args: { query: string }): Promise<string>\n\n" +
+		"Step 2 - execute_code uses those signatures:\n" +
 		"```js\n" +
-		"const results = await tools.server1.search({ query: \"...\" });\n" +
-		"const detail = await tools.server1.get_item({ id: results[0].id });\n" +
-		"await tools.server2.create({ title: detail.name, content: detail.body });\n" +
-		"return { created: true, source: detail.name };\n" +
-		"```"
+		"await tools.sqlite.write_query({ query: \"INSERT INTO users (name) VALUES ('Alice')\" });\n" +
+		"const rows = await tools.sqlite.read_query({ query: \"SELECT * FROM users\" });\n" +
+		"return rows; // direct value, no wrapper\n" +
+		"```\n\n" +
+		"RULES:\n" +
+		"- All calls return Promises (use await)\n" +
+		"- Results are unwrapped values (objects, arrays, strings) - not MCP protocol wrappers\n" +
+		"- Use tools.serverName.toolName(args) syntax\n" +
+		"- Use console.log() for debugging\n" +
+		"- Assign to return for output: return { key: value }\n\n" +
+		"NOTE: Return types shown as Promise<any> mean the tool has not been called yet. " +
+		"After the first call, the return type is inferred automatically and will show the actual structure on the next search(). " +
+		"When you see Promise<any>, use console.log() on the result to inspect its shape."
 
-	var codeDesc string
-	if s.cfg.SchemaThreshold < 0 || (s.cfg.SchemaThreshold > 0 && totalCount <= s.cfg.SchemaThreshold) {
-		typeDefs := executor.GenerateTypeDefs(allTools, outputSchemas)
-		codeDesc = codeIntro
-		if typeDefs != "" {
-			codeDesc += "\n\n" + typeDefs
-		}
-	} else {
-		summaries := executor.GenerateServerSummaries(allTools)
-		codeDesc = codeIntro + fmt.Sprintf(
-			"\n\n%d tools across %d servers. "+
-				"Use search(\"your goal\") to find specific tools first.",
-			totalCount, len(allTools),
-		)
-		if summaries != "" {
-			codeDesc += "\n\nAvailable servers:\n" + summaries
-		}
+	if summaries != "" {
+		codeDesc += "\n\nRegistered servers:\n" + summaries
 	}
 
 	return []protocol.Tool{
@@ -318,7 +298,7 @@ func (s *Server) buildToolList() []protocol.Tool {
 func (s *Server) addMCPTool() protocol.Tool {
 	return protocol.Tool{
 		Name:        "add_mcp",
-		Description: "Register a new HTTP MCP server. Discovers its tools and makes them available in execute_code scripts. For local stdio MCP servers, use the CLI: voidmcp add <name> <command>",
+		Description: "Register a new HTTP MCP server. Connects to the URL, discovers available tools, and makes them callable via execute_code. After adding, use search() to see the discovered tools. Example: add_mcp(name=\"github\", url=\"https://mcp.github.com\"). For local servers that run as child processes, use the CLI instead: voidmcp add <name> <command>",
 		InputSchema: protocol.InputSchema{
 			Type: "object",
 			Properties: map[string]protocol.Property{
@@ -336,7 +316,7 @@ func (s *Server) addMCPTool() protocol.Tool {
 func (s *Server) removeMCPTool() protocol.Tool {
 	return protocol.Tool{
 		Name:        "remove_mcp",
-		Description: "Unregister an MCP server and remove it from the tool index.",
+		Description: "Unregister an MCP server, close its connection, and remove all its tools from the index. The server's tools will no longer be available in search() or execute_code.",
 		InputSchema: protocol.InputSchema{
 			Type: "object",
 			Properties: map[string]protocol.Property{
@@ -351,7 +331,7 @@ func (s *Server) removeMCPTool() protocol.Tool {
 func (s *Server) listMCPsTool() protocol.Tool {
 	return protocol.Tool{
 		Name:        "list_mcps",
-		Description: "List all registered MCP servers and their connection status.",
+		Description: "List all registered MCP servers with their connection status, URL/command, and tool names. Returns JSON with server name, status (connected/error), and the list of available tools per server. Use search() instead if you need full tool signatures with parameter types.",
 		InputSchema: protocol.InputSchema{
 			Type:       "object",
 			Properties: map[string]protocol.Property{},
@@ -363,11 +343,11 @@ func (s *Server) listMCPsTool() protocol.Tool {
 func (s *Server) searchTool() protocol.Tool {
 	return protocol.Tool{
 		Name:        "search",
-		Description: "Search registered MCP tools by keyword. Returns matching tools with TypeScript definitions.",
+		Description: "Discover tool signatures before using execute_code. Always call this first to learn parameter names, types, and return values. Returns matching tools with full TypeScript definitions including inferred return types from previous calls. Search by keyword, by server name (returns all tools from that server), or use \"*\" to browse all available tools. If no results are returned, no MCP servers have been registered yet - use add_mcp or ask the user to add servers via CLI.",
 		InputSchema: protocol.InputSchema{
 			Type: "object",
 			Properties: map[string]protocol.Property{
-				"query": {Type: "string", Description: "Search terms to match against tool names and descriptions"},
+				"query": {Type: "string", Description: "Keyword, server name, or \"*\" to browse all. Examples: \"read file\", \"sqlite\", \"*\""},
 			},
 			Required: []string{"query"},
 		},
