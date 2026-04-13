@@ -2,3 +2,4 @@
 *.exe
 /voidmcp
 *.out
+.codex/

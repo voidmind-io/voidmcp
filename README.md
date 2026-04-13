@@ -32,7 +32,21 @@ await tools.slack.post_message({ channel: "#bugs", text: `Synced ${issues.items.
 go install github.com/voidmind-io/voidmcp/cmd/voidmcp@latest
 ```
 
-Or download a binary from [Releases](https://github.com/voidmind-io/voidmcp/releases).
+Or install the latest release binary:
+
+macOS / Linux:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/voidmind-io/voidmcp/main/install.sh | sh
+```
+
+Windows (PowerShell):
+
+```powershell
+irm https://raw.githubusercontent.com/voidmind-io/voidmcp/main/install.ps1 | iex
+```
+
+Manual downloads are also available on [Releases](https://github.com/voidmind-io/voidmcp/releases).
 
 ## Quick start
 
