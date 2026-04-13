@@ -12,7 +12,6 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
-	"syscall"
 	"time"
 
 	"github.com/voidmind-io/voidmcp/internal/protocol"
@@ -326,7 +325,7 @@ func (t *StdioTransport) Close() {
 	case <-done:
 		// exited cleanly
 	case <-time.After(5 * time.Second):
-		t.cmd.Process.Signal(syscall.SIGTERM) //nolint:errcheck — best effort
+		t.cmd.Process.Kill() //nolint:errcheck — best effort (SIGTERM unavailable on Windows)
 		select {
 		case <-done:
 		case <-time.After(2 * time.Second):

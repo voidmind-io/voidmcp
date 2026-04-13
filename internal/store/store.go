@@ -16,6 +16,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"time"
 
 	_ "modernc.org/sqlite" // register "sqlite" driver
@@ -311,9 +312,13 @@ func keyPath(dbPath string) string {
 func loadOrCreateKey(path string) ([]byte, error) {
 	data, err := os.ReadFile(path)
 	if err == nil {
-		info, statErr := os.Stat(path)
-		if statErr == nil && info.Mode().Perm()&0o077 != 0 {
-			return nil, fmt.Errorf("key file %s has unsafe permissions %04o, expected 0600", path, info.Mode().Perm())
+		// On Unix, reject group/world-readable key files. Windows does not
+		// use POSIX permission bits, so the check is skipped there.
+		if runtime.GOOS != "windows" {
+			info, statErr := os.Stat(path)
+			if statErr == nil && info.Mode().Perm()&0o077 != 0 {
+				return nil, fmt.Errorf("key file %s has unsafe permissions %04o, expected 0600", path, info.Mode().Perm())
+			}
 		}
 		if len(data) != 32 {
 			return nil, fmt.Errorf("key file %q has unexpected length %d (want 32)", path, len(data))
