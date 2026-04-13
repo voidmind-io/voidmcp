@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"strings"
 	"sync"
 	"time"
@@ -332,6 +333,143 @@ func (r *Registry) CallTool(ctx context.Context, serverName, toolName string, ar
 		return nil, fmt.Errorf("registry: call tool %q/%q: %w", serverName, toolName, err)
 	}
 	return result, nil
+}
+
+// Watch periodically polls the store for server add/remove and applies the
+// diff to the in-memory registry. onChange is invoked (from the watcher
+// goroutine) after any tick that produced a non-empty diff, so callers can
+// broadcast notifications to clients. Returns when ctx is cancelled.
+//
+// If interval is <= 0, Watch returns immediately without starting a ticker.
+func (r *Registry) Watch(ctx context.Context, interval time.Duration, onChange func()) {
+	if interval <= 0 {
+		return
+	}
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			r.tickOnce(ctx, onChange)
+		}
+	}
+}
+
+// tickOnce performs a single poll cycle: fetches DB names, diffs against the
+// in-memory registry, connects added servers, and removes dropped ones.
+func (r *Registry) tickOnce(ctx context.Context, onChange func()) {
+	changed := false
+	defer func() {
+		if rec := recover(); rec != nil {
+			log.Printf("registry watch: panic: %v", rec)
+		}
+		if changed && onChange != nil {
+			onChange()
+		}
+	}()
+
+	dbNames, err := r.store.ListServerNames(ctx)
+	if err != nil {
+		log.Printf("registry watch: list server names: %v", err)
+		return
+	}
+
+	dbSet := make(map[string]struct{}, len(dbNames))
+	for _, n := range dbNames {
+		dbSet[n] = struct{}{}
+	}
+
+	r.mu.RLock()
+	memNames := make(map[string]struct{}, len(r.servers))
+	for n := range r.servers {
+		memNames[n] = struct{}{}
+	}
+	r.mu.RUnlock()
+
+	var added, removed []string
+	for n := range dbSet {
+		if _, ok := memNames[n]; !ok {
+			added = append(added, n)
+		}
+	}
+	for n := range memNames {
+		if _, ok := dbSet[n]; !ok {
+			removed = append(removed, n)
+		}
+	}
+
+	if ctx.Err() != nil {
+		return
+	}
+
+	for _, name := range added {
+		if ctx.Err() != nil {
+			return
+		}
+		srv, getErr := r.store.GetServer(ctx, name)
+		if getErr != nil {
+			log.Printf("registry watch: get server %q: %v", name, getErr)
+			continue
+		}
+		t, transErr := newTransport(*srv)
+		if transErr != nil {
+			// Do not stub into r.servers — leaving the name absent lets the
+			// next tick retry automatically (self-healing after transient
+			// network/process errors).
+			log.Printf("registry watch: new transport for %q: %v", name, transErr)
+			continue
+		}
+		tools, listErr := t.ListTools(ctx)
+		if listErr != nil {
+			// Same self-healing rationale as above: discard the failed attempt
+			// so the next tick re-attempts ListTools.
+			log.Printf("registry watch: list tools for %q: %v", name, listErr)
+			t.Close()
+			continue
+		}
+		_ = r.store.CacheTools(ctx, name, tools)
+		r.mu.Lock()
+		// TOCTOU guard: if Add() raced us and already installed a transport,
+		// back off and let Add's entry win to avoid leaking the transport we
+		// just created.
+		if _, exists := r.servers[name]; exists {
+			r.mu.Unlock()
+			t.Close()
+			continue
+		}
+		r.servers[name] = serverMeta{transport: t, url: srv.URL, command: srv.Command}
+		r.tools[name] = tools
+		r.statuses[name] = "connected"
+		r.mu.Unlock()
+		changed = true
+	}
+
+	if ctx.Err() != nil {
+		return
+	}
+
+	for _, name := range removed {
+		if ctx.Err() != nil {
+			return
+		}
+		r.mu.Lock()
+		meta, ok := r.servers[name]
+		if ok {
+			delete(r.servers, name)
+			delete(r.tools, name)
+			delete(r.statuses, name)
+		}
+		r.mu.Unlock()
+		if ok && meta.transport != nil {
+			meta.transport.Close()
+		}
+		if ok {
+			changed = true
+		}
+	}
 }
 
 // Close closes all transport connections held by the registry.

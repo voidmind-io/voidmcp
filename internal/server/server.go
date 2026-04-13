@@ -200,6 +200,13 @@ func (s *Server) ServeStdio(ctx context.Context) {
 	}
 }
 
+// BroadcastToolsChanged sends a notifications/tools/list_changed notification
+// to the current client. Safe to call from any goroutine. In HTTP mode, where
+// no persistent stdio writer is set, this is a no-op.
+func (s *Server) BroadcastToolsChanged() {
+	s.sendNotification("notifications/tools/list_changed")
+}
+
 // sendNotification sends a JSON-RPC notification to the client. In stdio mode
 // it writes directly to stdout. In HTTP mode this is a no-op (clients re-fetch
 // tools/list on their own schedule).
@@ -248,6 +255,11 @@ func (s *Server) buildToolList() []protocol.Tool {
 
 	codeDesc := "Execute JavaScript that chains multiple MCP tool calls in a single turn. " +
 		"Use this instead of calling tools individually - pass output from one tool as input to the next.\n\n" +
+		"STRONG PREFERENCE: Whenever a task needs more than one downstream MCP tool call, use execute_code. " +
+		"Sequential calls on your own side cost one LLM round-trip each; chained calls inside execute_code cost one round-trip total. " +
+		"Two or more downstream MCP calls for the same task = use execute_code. One downstream call = call it directly. " +
+		"(search, add_mcp, list_mcps, remove_mcp are voidmcp control tools and do not count toward this rule.) " +
+		"If the next call depends on the previous result, chain it here. If N calls are independent, Promise.allSettled them here.\n\n" +
 		"WORKFLOW: Always call search() first, then execute_code.\n\n" +
 		"Step 1 - search(\"your goal\") returns TypeScript signatures like:\n" +
 		"  tools.sqlite.read_query(args: { query: string }): Promise<Array<{ id: number; name: string }>>\n" +
@@ -264,6 +276,17 @@ func (s *Server) buildToolList() []protocol.Tool {
 		"- Use tools.serverName.toolName(args) syntax\n" +
 		"- Use console.log() for debugging\n" +
 		"- Assign to return for output: return { key: value }\n\n" +
+		"PATTERNS:\n" +
+		"- Parallel fan-out (N calls, one turn):\n" +
+		"  ```js\n" +
+		"  const results = await Promise.allSettled(items.map(i => tools.x.do(i)));\n" +
+		"  const failed = results.flatMap((r, idx) => r.status === \"rejected\" ? [{ i: idx, err: String(r.reason) }] : []);\n" +
+		"  ```\n" +
+		"- Continue on partial failure (sequential):\n" +
+		"  ```js\n" +
+		"  for (const i of items) { try { await tools.x.do(i); } catch (e) { console.log(\"skip\", i, e); } }\n" +
+		"  ```\n" +
+		"- Unhandled rejection aborts the run. The response still returns error + logs + tool_calls up to the failure, so you can retry next turn.\n\n" +
 		"NOTE: Return types shown as Promise<any> mean the tool has not been called yet. " +
 		"After the first call, the return type is inferred automatically and will show the actual structure on the next search(). " +
 		"When you see Promise<any>, use console.log() on the result to inspect its shape."
@@ -341,7 +364,7 @@ func (s *Server) listMCPsTool() protocol.Tool {
 func (s *Server) searchTool() protocol.Tool {
 	return protocol.Tool{
 		Name:        "search",
-		Description: "Discover tool signatures before using execute_code. Always call this first to learn parameter names, types, and return values. Returns matching tools with full TypeScript definitions including inferred return types from previous calls. Search by keyword, by server name (returns all tools from that server), or use \"*\" to browse all available tools. If no results are returned, no MCP servers have been registered yet - use add_mcp or ask the user to add servers via CLI.",
+		Description: "Discover tool signatures before using execute_code. Always call this first to learn parameter names, types, and return values. Returns matching tools with full TypeScript definitions including inferred return types from previous calls. Search by keyword, by server name (returns all tools from that server), or use \"*\" to browse all available tools. If no results are returned, no MCP servers have been registered yet - use add_mcp or ask the user to add servers via CLI. After search() returns signatures, use execute_code to call them - especially if the task needs more than one tool call. Calling tools individually after searching wastes round-trips; chain them inside execute_code instead.",
 		InputSchema: protocol.InputSchema{
 			Type: "object",
 			Properties: map[string]protocol.Property{

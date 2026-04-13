@@ -1038,3 +1038,84 @@ func TestSaveOutputSchema_MultipleToolsForSameServer(t *testing.T) {
 		}
 	}
 }
+
+// --- ListServerNames (v0.0.10) ---
+
+func TestListServerNames_EmptyStore(t *testing.T) {
+	t.Parallel()
+
+	s := newTestStore(t)
+
+	names, err := s.ListServerNames(context.Background())
+	if err != nil {
+		t.Fatalf("ListServerNames on empty store: %v", err)
+	}
+	if len(names) != 0 {
+		t.Errorf("expected empty slice, got %v", names)
+	}
+}
+
+func TestListServerNames_ReturnsAllRegisteredNames(t *testing.T) {
+	t.Parallel()
+
+	s := newTestStore(t)
+	ctx := context.Background()
+
+	want := []string{"alpha", "beta", "gamma"}
+	for _, name := range want {
+		if err := s.AddServer(ctx, store.MCPServer{Name: name, URL: "http://x"}); err != nil {
+			t.Fatalf("AddServer %q: %v", name, err)
+		}
+	}
+
+	got, err := s.ListServerNames(ctx)
+	if err != nil {
+		t.Fatalf("ListServerNames: %v", err)
+	}
+	if len(got) != len(want) {
+		t.Fatalf("ListServerNames returned %d names, want %d", len(got), len(want))
+	}
+
+	// Order is not guaranteed by ListServerNames, so build a set for comparison.
+	gotSet := make(map[string]struct{}, len(got))
+	for _, n := range got {
+		gotSet[n] = struct{}{}
+	}
+	for _, name := range want {
+		if _, ok := gotSet[name]; !ok {
+			t.Errorf("name %q missing from ListServerNames result", name)
+		}
+	}
+}
+
+func TestListServerNames_DoesNotReturnRemovedNames(t *testing.T) {
+	t.Parallel()
+
+	s := newTestStore(t)
+	ctx := context.Background()
+
+	// Add three servers, then remove one.
+	for _, name := range []string{"keep-a", "remove-me", "keep-b"} {
+		if err := s.AddServer(ctx, store.MCPServer{Name: name, URL: "http://x"}); err != nil {
+			t.Fatalf("AddServer %q: %v", name, err)
+		}
+	}
+
+	if err := s.RemoveServer(ctx, "remove-me"); err != nil {
+		t.Fatalf("RemoveServer: %v", err)
+	}
+
+	names, err := s.ListServerNames(ctx)
+	if err != nil {
+		t.Fatalf("ListServerNames: %v", err)
+	}
+	if len(names) != 2 {
+		t.Fatalf("expected 2 names after remove, got %d: %v", len(names), names)
+	}
+
+	for _, n := range names {
+		if n == "remove-me" {
+			t.Errorf("ListServerNames still contains removed server %q", n)
+		}
+	}
+}

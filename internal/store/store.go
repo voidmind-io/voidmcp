@@ -199,6 +199,29 @@ func (s *Store) ListServers(ctx context.Context) ([]MCPServer, error) {
 	return servers, nil
 }
 
+// ListServerNames returns the names of all registered MCP servers. This is a
+// cheap query used by Registry.Watch for diffing against the in-memory state.
+func (s *Store) ListServerNames(ctx context.Context) ([]string, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT name FROM mcp_servers`)
+	if err != nil {
+		return nil, fmt.Errorf("store: list server names: %w", err)
+	}
+	defer rows.Close()
+
+	var names []string
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			return nil, fmt.Errorf("store: list server names: %w", err)
+		}
+		names = append(names, name)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("store: list server names: %w", err)
+	}
+	return names, nil
+}
+
 // GetServer returns the named server. Auth token is decrypted before
 // returning. Returns ErrNotFound if no server with that name exists.
 func (s *Store) GetServer(ctx context.Context, name string) (*MCPServer, error) {

@@ -63,8 +63,14 @@ func runServe() {
 	timeout := fs.Duration("timeout", 30*time.Second, "Per-execution timeout")
 	maxToolCalls := fs.Int("max-tool-calls", 50, "Maximum tool calls per execution")
 	schemaTTL := fs.Duration("schema-ttl", 168*time.Hour, "How often to re-infer output schemas (default: 7 days)")
+	watchInterval := fs.Duration("watch-interval", 5*time.Second, "How often to poll the DB for server add/remove from other processes (0 disables). Lower values pick up CLI changes faster; higher values are easier on slow disks.")
 	if err := fs.Parse(os.Args[2:]); err != nil {
 		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+
+	if *watchInterval != 0 && *watchInterval < time.Second {
+		fmt.Fprintln(os.Stderr, "error: --watch-interval must be 0 (disabled) or at least 1s")
 		os.Exit(1)
 	}
 
@@ -141,6 +147,10 @@ func runServe() {
 
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
+
+	if *watchInterval > 0 {
+		go reg.Watch(ctx, *watchInterval, srv.BroadcastToolsChanged)
+	}
 
 	if *stdio {
 		srv.ServeStdio(ctx)
@@ -316,7 +326,7 @@ func printUsage() {
 Usage:
   voidmcp serve   [--host ADDR] [--port N] [--stdio] [--no-auth] [--token T] [--db PATH]
                   [--pool-size N] [--memory MB] [--timeout D]
-                  [--max-tool-calls N] [--schema-ttl D]
+                  [--max-tool-calls N] [--schema-ttl D] [--watch-interval D]
   voidmcp add     <name> <url-or-command> [--token T] [--header H] [--db PATH]
   voidmcp remove  <name> [--db PATH]
   voidmcp list    [--db PATH]

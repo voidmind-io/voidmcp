@@ -782,6 +782,286 @@ func TestRegistry_Close_NoServersPanics(t *testing.T) {
 	reg.Close()
 }
 
+// --- Watch (v0.0.10) ---
+
+// waitFor polls cond every 5ms until it returns true or deadline elapses.
+// It calls t.Fatal if the deadline is reached before cond becomes true.
+func waitFor(t *testing.T, deadline time.Duration, cond func() bool) {
+	t.Helper()
+	end := time.Now().Add(deadline)
+	for time.Now().Before(end) {
+		if cond() {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatalf("condition not satisfied within %v", deadline)
+}
+
+// newTestRegistryFromStore creates a Registry from an existing store (shared
+// between the watcher under test and the "other writer" that calls the store
+// directly).
+func newTestRegistryFromStore(t *testing.T, st *store.Store) *registry.Registry {
+	t.Helper()
+	reg := registry.New(st, time.Hour)
+	t.Cleanup(func() { reg.Close() })
+	return reg
+}
+
+// TestWatch_PicksUpAddFromAnotherWriter simulates a second process calling
+// st.AddServer directly (e.g. `voidmcp add`) while Watch is running. The
+// watcher must pick up the new server and invoke onChange.
+func TestWatch_PicksUpAddFromAnotherWriter(t *testing.T) {
+	t.Parallel()
+
+	st := newTestStore(t)
+	reg := newTestRegistryFromStore(t, st)
+
+	upstream := mcpStubServer(t, []protocol.Tool{{Name: "tool_one"}}, nil)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	var callCount int
+	var mu sync.Mutex
+	onChange := func() {
+		mu.Lock()
+		callCount++
+		mu.Unlock()
+	}
+
+	go reg.Watch(ctx, 20*time.Millisecond, onChange)
+
+	// Capture callCount before the store write so we can assert it increases.
+	mu.Lock()
+	countBefore := callCount
+	mu.Unlock()
+
+	// Write the server directly to the store — bypassing the registry Add path —
+	// to simulate a second CLI process.
+	if err := st.AddServer(ctx, store.MCPServer{
+		Name: "watcher-add-test",
+		URL:  upstream.URL,
+	}); err != nil {
+		t.Fatalf("st.AddServer: %v", err)
+	}
+
+	// Wait for the watcher to pick up the new server.
+	waitFor(t, 500*time.Millisecond, func() bool {
+		for _, s := range reg.List() {
+			if s.Name == "watcher-add-test" {
+				return true
+			}
+		}
+		return false
+	})
+
+	mu.Lock()
+	got := callCount
+	mu.Unlock()
+
+	if got <= countBefore {
+		t.Errorf("onChange call count did not increase after store add: before=%d after=%d", countBefore, got)
+	}
+}
+
+// TestWatch_PicksUpRemoveFromAnotherWriter verifies that when a server is
+// deleted directly from the store, the watcher removes it from the in-memory
+// registry and calls onChange.
+func TestWatch_PicksUpRemoveFromAnotherWriter(t *testing.T) {
+	t.Parallel()
+
+	st := newTestStore(t)
+	reg := newTestRegistryFromStore(t, st)
+
+	upstream := mcpStubServer(t, []protocol.Tool{{Name: "t"}}, nil)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// Pre-populate via registry.Add so the server is in both the store and
+	// the in-memory index.
+	if _, err := reg.Add(ctx, store.MCPServer{
+		Name: "watcher-remove-test",
+		URL:  upstream.URL,
+	}); err != nil {
+		t.Fatalf("reg.Add: %v", err)
+	}
+
+	var callCount int
+	var mu sync.Mutex
+	onChange := func() {
+		mu.Lock()
+		callCount++
+		mu.Unlock()
+	}
+
+	go reg.Watch(ctx, 20*time.Millisecond, onChange)
+
+	// Delete directly from the store — simulating another process.
+	if err := st.RemoveServer(ctx, "watcher-remove-test"); err != nil {
+		t.Fatalf("st.RemoveServer: %v", err)
+	}
+
+	// Wait for the watcher to drop the server from the in-memory index.
+	waitFor(t, 500*time.Millisecond, func() bool {
+		for _, s := range reg.List() {
+			if s.Name == "watcher-remove-test" {
+				return false
+			}
+		}
+		return true
+	})
+
+	mu.Lock()
+	got := callCount
+	mu.Unlock()
+
+	if got == 0 {
+		t.Error("onChange was never called after store remove")
+	}
+}
+
+// TestWatch_NoDiffNoOnChange asserts that when the store matches the in-memory
+// registry, onChange is never called across several tick cycles.
+func TestWatch_NoDiffNoOnChange(t *testing.T) {
+	t.Parallel()
+
+	st := newTestStore(t)
+	reg := newTestRegistryFromStore(t, st)
+
+	upstream := mcpStubServer(t, []protocol.Tool{{Name: "t"}}, nil)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// Add a server so both in-memory and store are in sync from the start.
+	if _, err := reg.Add(ctx, store.MCPServer{
+		Name: "no-diff-server",
+		URL:  upstream.URL,
+	}); err != nil {
+		t.Fatalf("reg.Add: %v", err)
+	}
+
+	var callCount int
+	var mu sync.Mutex
+	onChange := func() {
+		mu.Lock()
+		callCount++
+		mu.Unlock()
+	}
+
+	go reg.Watch(ctx, 20*time.Millisecond, onChange)
+
+	// Allow at least 5 tick cycles (5 * 20ms = 100ms) to elapse.
+	time.Sleep(120 * time.Millisecond)
+
+	mu.Lock()
+	got := callCount
+	mu.Unlock()
+
+	if got != 0 {
+		t.Errorf("onChange called %d times with no diff, want 0", got)
+	}
+}
+
+// TestWatch_StopsOnContextCancellation verifies that the Watch goroutine exits
+// promptly when its context is cancelled.
+func TestWatch_StopsOnContextCancellation(t *testing.T) {
+	t.Parallel()
+
+	reg := newTestRegistry(t)
+
+	ctx, cancel := context.WithCancel(context.Background())
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		reg.Watch(ctx, 20*time.Millisecond, nil)
+	}()
+
+	// Cancel the context and expect the goroutine to stop within 500ms.
+	cancel()
+
+	select {
+	case <-done:
+		// Goroutine exited cleanly.
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("Watch goroutine did not stop after context cancellation")
+	}
+}
+
+// TestWatch_SurvivesTransportErrorForNewServer checks that when a server added
+// to the store has an unreachable URL (transport / tool-fetch fails), the
+// watcher does not panic and stays alive so that subsequent healthy adds still
+// work. Failed attempts are NOT stubbed into the registry — they are retried
+// on the next tick (self-healing after transient errors).
+func TestWatch_SurvivesTransportErrorForNewServer(t *testing.T) {
+	t.Parallel()
+
+	st := newTestStore(t)
+	reg := newTestRegistryFromStore(t, st)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	var changeCount int
+	var mu sync.Mutex
+	onChange := func() {
+		mu.Lock()
+		changeCount++
+		mu.Unlock()
+	}
+
+	go reg.Watch(ctx, 20*time.Millisecond, onChange)
+
+	// Add a server with an unreachable URL directly to the store, bypassing
+	// the registry (which would refuse to add an unreachable server).
+	if err := st.AddServer(ctx, store.MCPServer{
+		Name: "broken-server",
+		URL:  "http://127.0.0.1:1", // nothing listening here
+	}); err != nil {
+		t.Fatalf("st.AddServer broken: %v", err)
+	}
+
+	// Give the watcher a few ticks to attempt (and fail) the broken server.
+	// The broken server must NOT appear in List() because failed attempts are
+	// not stubbed in — they are left for the next tick to retry.
+	time.Sleep(120 * time.Millisecond)
+	for _, s := range reg.List() {
+		if s.Name == "broken-server" {
+			t.Errorf("broken-server should not be in List() after transport failure; got status=%q", s.Status)
+		}
+	}
+
+	// Now add a healthy server to confirm the watcher is still running despite
+	// repeated failures on the broken server.
+	upstream := mcpStubServer(t, []protocol.Tool{{Name: "healthy_tool"}}, nil)
+	if err := st.AddServer(ctx, store.MCPServer{
+		Name: "healthy-server",
+		URL:  upstream.URL,
+	}); err != nil {
+		t.Fatalf("st.AddServer healthy: %v", err)
+	}
+
+	waitFor(t, 500*time.Millisecond, func() bool {
+		for _, s := range reg.List() {
+			if s.Name == "healthy-server" && s.Status == "connected" {
+				return true
+			}
+		}
+		return false
+	})
+
+	mu.Lock()
+	got := changeCount
+	mu.Unlock()
+
+	if got < 1 {
+		t.Errorf("onChange called %d times, want >= 1 (at least for healthy-server add)", got)
+	}
+}
+
 // --- Concurrency ---
 
 func TestRegistry_ConcurrentAddSearch(t *testing.T) {
