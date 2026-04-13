@@ -46,20 +46,30 @@ type Config struct {
 	// valid token receive 401. Set to empty to disable auth (e.g. behind a
 	// trusted reverse proxy or when --no-auth is passed).
 	BearerToken string
+	// SchemaTTL controls how long an inferred output schema is considered
+	// fresh. When a tool's stored schema is older than SchemaTTL the next
+	// invocation re-infers and overwrites it. Zero disables re-inference
+	// (schemas are inferred once and kept forever). The schema is always
+	// shown in TypeScript defs regardless of staleness.
+	SchemaTTL time.Duration
 }
 
 // Server is the voidmcp MCP server. It is safe for concurrent use.
 type Server struct {
 	registry *registry.Registry
 	executor *executor.Executor
+	store    *store.Store
 	cfg      Config
 }
 
-// New creates a new Server backed by the given Registry and Executor.
-func New(reg *registry.Registry, exec *executor.Executor, cfg Config) *Server {
+// New creates a new Server backed by the given Registry, Executor, and Store.
+// st may be nil, in which case output schema inference and persistence are
+// disabled.
+func New(reg *registry.Registry, exec *executor.Executor, st *store.Store, cfg Config) *Server {
 	return &Server{
 		registry: reg,
 		executor: exec,
+		store:    st,
 		cfg:      cfg,
 	}
 }
@@ -210,6 +220,18 @@ func (s *Server) buildToolList() []protocol.Tool {
 	allTools := s.registry.AllTools()
 	totalCount := s.registry.TotalToolCount()
 
+	// Load inferred output schemas for all servers so TypeScript defs can show
+	// concrete return types instead of Promise<any>.
+	outputSchemas := make(map[string]map[string]json.RawMessage)
+	if s.store != nil {
+		for serverName := range allTools {
+			schemas, _, _ := s.store.GetAllOutputSchemas(context.Background(), serverName, s.cfg.SchemaTTL)
+			if len(schemas) > 0 {
+				outputSchemas[serverName] = schemas
+			}
+		}
+	}
+
 	const codeIntro = "Execute JavaScript that chains multiple MCP tool calls in a single turn. " +
 		"Use this instead of calling tools individually - pass output from one tool as input to the next. " +
 		"All calls return Promises (use await). Tool results are plain objects you can destructure and pass along.\n\n" +
@@ -223,7 +245,7 @@ func (s *Server) buildToolList() []protocol.Tool {
 
 	var codeDesc string
 	if s.cfg.SchemaThreshold < 0 || (s.cfg.SchemaThreshold > 0 && totalCount <= s.cfg.SchemaThreshold) {
-		typeDefs := executor.GenerateTypeDefs(allTools)
+		typeDefs := executor.GenerateTypeDefs(allTools, outputSchemas)
 		codeDesc = codeIntro
 		if typeDefs != "" {
 			codeDesc += "\n\n" + typeDefs
@@ -466,7 +488,7 @@ func (s *Server) handleSearch(_ context.Context, raw json.RawMessage) *protocol.
 
 	var sb strings.Builder
 	fmt.Fprintf(&sb, "Found %d tool(s) matching %q:\n\n", len(results), args.Query)
-	sb.WriteString(executor.GenerateTypeDefs(matched))
+	sb.WriteString(executor.GenerateTypeDefs(matched, nil))
 	return protocol.TextResult(sb.String())
 }
 
@@ -488,6 +510,22 @@ func (s *Server) handleExecuteCode(ctx context.Context, raw json.RawMessage) *pr
 		ServerTools:  s.registry.AllTools(),
 		CallTool:     s.registry.CallTool,
 		MaxToolCalls: s.cfg.MaxToolCalls,
+	}
+
+	// Wire schema capture hook when a store is available. The hook runs in its
+	// own goroutine and never blocks the JS event loop. It only re-infers when
+	// the stored schema is missing or older than SchemaTTL.
+	if s.store != nil {
+		schemaTTL := s.cfg.SchemaTTL
+		st := s.store
+		params.OnToolResult = func(serverName, toolName string, result json.RawMessage) {
+			if st.IsOutputSchemaStale(context.Background(), serverName, toolName, schemaTTL) {
+				schema := executor.InferSchema(result)
+				if schema != nil {
+					_ = st.SaveOutputSchema(context.Background(), serverName, toolName, schema)
+				}
+			}
+		}
 	}
 
 	result, err := s.executor.Execute(ctx, params)

@@ -2,6 +2,7 @@ package store_test
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -709,5 +710,331 @@ func TestAddServer_AddedAtPopulated(t *testing.T) {
 	}
 	if got.AddedAt.After(after) {
 		t.Errorf("AddedAt %v is after test end %v", got.AddedAt, after)
+	}
+}
+
+// --- SaveOutputSchema / GetAllOutputSchemas / IsOutputSchemaStale ---
+
+func addServerForSchema(t *testing.T, s *store.Store, name string) {
+	t.Helper()
+	ctx := context.Background()
+	if err := s.AddServer(ctx, store.MCPServer{Name: name, URL: "http://x"}); err != nil {
+		t.Fatalf("AddServer %q: %v", name, err)
+	}
+}
+
+func TestSaveAndGetOutputSchemas_RoundTrip(t *testing.T) {
+	t.Parallel()
+
+	s := newTestStore(t)
+	ctx := context.Background()
+	addServerForSchema(t, s, "schema-srv")
+
+	schema := json.RawMessage(`{"type":"string"}`)
+	if err := s.SaveOutputSchema(ctx, "schema-srv", "get_name", schema); err != nil {
+		t.Fatalf("SaveOutputSchema: %v", err)
+	}
+
+	schemas, stale, err := s.GetAllOutputSchemas(ctx, "schema-srv", time.Hour)
+	if err != nil {
+		t.Fatalf("GetAllOutputSchemas: %v", err)
+	}
+	if len(schemas) != 1 {
+		t.Fatalf("expected 1 schema, got %d", len(schemas))
+	}
+	got, ok := schemas["get_name"]
+	if !ok {
+		t.Fatal("schema for get_name not found")
+	}
+	if string(got) != `{"type":"string"}` {
+		t.Errorf("schema = %s, want %s", string(got), `{"type":"string"}`)
+	}
+	// Schema was just saved; with maxAge=1h it should NOT be stale.
+	if len(stale) != 0 {
+		t.Errorf("expected 0 stale tools, got %v", stale)
+	}
+}
+
+func TestSaveOutputSchema_Upsert(t *testing.T) {
+	t.Parallel()
+
+	s := newTestStore(t)
+	ctx := context.Background()
+	addServerForSchema(t, s, "upsert-srv")
+
+	// Save initial schema.
+	if err := s.SaveOutputSchema(ctx, "upsert-srv", "my_tool", json.RawMessage(`{"type":"number"}`)); err != nil {
+		t.Fatalf("first SaveOutputSchema: %v", err)
+	}
+	// Overwrite with a new schema.
+	if err := s.SaveOutputSchema(ctx, "upsert-srv", "my_tool", json.RawMessage(`{"type":"boolean"}`)); err != nil {
+		t.Fatalf("second SaveOutputSchema: %v", err)
+	}
+
+	schemas, _, err := s.GetAllOutputSchemas(ctx, "upsert-srv", time.Hour)
+	if err != nil {
+		t.Fatalf("GetAllOutputSchemas: %v", err)
+	}
+	if len(schemas) != 1 {
+		t.Fatalf("expected 1 schema after upsert, got %d", len(schemas))
+	}
+	if string(schemas["my_tool"]) != `{"type":"boolean"}` {
+		t.Errorf("schema after upsert = %s, want boolean", string(schemas["my_tool"]))
+	}
+}
+
+func TestGetAllOutputSchemas_MultipleTools(t *testing.T) {
+	t.Parallel()
+
+	s := newTestStore(t)
+	ctx := context.Background()
+	addServerForSchema(t, s, "multi-srv")
+
+	tools := map[string]json.RawMessage{
+		"tool_a": json.RawMessage(`{"type":"string"}`),
+		"tool_b": json.RawMessage(`{"type":"number"}`),
+		"tool_c": json.RawMessage(`{"type":"boolean"}`),
+	}
+	for name, schema := range tools {
+		if err := s.SaveOutputSchema(ctx, "multi-srv", name, schema); err != nil {
+			t.Fatalf("SaveOutputSchema %q: %v", name, err)
+		}
+	}
+
+	schemas, stale, err := s.GetAllOutputSchemas(ctx, "multi-srv", time.Hour)
+	if err != nil {
+		t.Fatalf("GetAllOutputSchemas: %v", err)
+	}
+	if len(schemas) != 3 {
+		t.Fatalf("expected 3 schemas, got %d", len(schemas))
+	}
+	for name, wantSchema := range tools {
+		got, ok := schemas[name]
+		if !ok {
+			t.Errorf("schema for %q not found", name)
+			continue
+		}
+		if string(got) != string(wantSchema) {
+			t.Errorf("schemas[%q] = %s, want %s", name, string(got), string(wantSchema))
+		}
+	}
+	// All just-saved; none should be stale with maxAge=1h.
+	if len(stale) != 0 {
+		t.Errorf("expected 0 stale tools for fresh schemas, got %v", stale)
+	}
+}
+
+func TestGetAllOutputSchemas_EmptyServer_ReturnsEmptyMap(t *testing.T) {
+	t.Parallel()
+
+	s := newTestStore(t)
+	ctx := context.Background()
+	addServerForSchema(t, s, "empty-schema-srv")
+
+	schemas, stale, err := s.GetAllOutputSchemas(ctx, "empty-schema-srv", time.Hour)
+	if err != nil {
+		t.Fatalf("GetAllOutputSchemas: %v", err)
+	}
+	if len(schemas) != 0 {
+		t.Errorf("expected 0 schemas for server with no saved schemas, got %d", len(schemas))
+	}
+	if len(stale) != 0 {
+		t.Errorf("expected 0 stale tools for empty server, got %v", stale)
+	}
+}
+
+func TestGetAllOutputSchemas_MaxAgeZero_NeverReportsStale(t *testing.T) {
+	t.Parallel()
+
+	s := newTestStore(t)
+	ctx := context.Background()
+	addServerForSchema(t, s, "zero-age-srv")
+
+	if err := s.SaveOutputSchema(ctx, "zero-age-srv", "my_tool", json.RawMessage(`{"type":"string"}`)); err != nil {
+		t.Fatalf("SaveOutputSchema: %v", err)
+	}
+
+	// maxAge = 0 means "never stale".
+	schemas, stale, err := s.GetAllOutputSchemas(ctx, "zero-age-srv", 0)
+	if err != nil {
+		t.Fatalf("GetAllOutputSchemas: %v", err)
+	}
+	if len(schemas) != 1 {
+		t.Fatalf("expected 1 schema, got %d", len(schemas))
+	}
+	if len(stale) != 0 {
+		t.Errorf("with maxAge=0 no tools should be stale, got %v", stale)
+	}
+}
+
+func TestGetAllOutputSchemas_ReturnsSchemaEvenWhenStale(t *testing.T) {
+	t.Parallel()
+
+	s := newTestStore(t)
+	ctx := context.Background()
+	addServerForSchema(t, s, "stale-return-srv")
+
+	if err := s.SaveOutputSchema(ctx, "stale-return-srv", "aged_tool", json.RawMessage(`{"type":"number"}`)); err != nil {
+		t.Fatalf("SaveOutputSchema: %v", err)
+	}
+
+	// Use a maxAge so tiny that the just-saved schema is already stale.
+	schemas, stale, err := s.GetAllOutputSchemas(ctx, "stale-return-srv", time.Nanosecond)
+	if err != nil {
+		t.Fatalf("GetAllOutputSchemas: %v", err)
+	}
+	// Schema should still be returned even though it's stale.
+	if len(schemas) != 1 {
+		t.Fatalf("expected 1 schema even when stale, got %d", len(schemas))
+	}
+	if string(schemas["aged_tool"]) != `{"type":"number"}` {
+		t.Errorf("stale schema content = %s, want number schema", string(schemas["aged_tool"]))
+	}
+	// The tool should appear in the stale list.
+	if len(stale) != 1 || stale[0] != "aged_tool" {
+		t.Errorf("stale list = %v, want [aged_tool]", stale)
+	}
+}
+
+func TestIsOutputSchemaStale_FreshSchema_NotStale(t *testing.T) {
+	t.Parallel()
+
+	s := newTestStore(t)
+	ctx := context.Background()
+	addServerForSchema(t, s, "fresh-srv")
+
+	if err := s.SaveOutputSchema(ctx, "fresh-srv", "my_tool", json.RawMessage(`{"type":"string"}`)); err != nil {
+		t.Fatalf("SaveOutputSchema: %v", err)
+	}
+
+	// Schema was just saved; with maxAge=2h it should NOT be stale.
+	if s.IsOutputSchemaStale(ctx, "fresh-srv", "my_tool", 2*time.Hour) {
+		t.Error("IsOutputSchemaStale = true for a just-saved schema with maxAge=2h — want false")
+	}
+}
+
+func TestIsOutputSchemaStale_AgedSchema_IsStale(t *testing.T) {
+	t.Parallel()
+
+	s := newTestStore(t)
+	ctx := context.Background()
+	addServerForSchema(t, s, "aged-srv")
+
+	if err := s.SaveOutputSchema(ctx, "aged-srv", "old_tool", json.RawMessage(`{"type":"string"}`)); err != nil {
+		t.Fatalf("SaveOutputSchema: %v", err)
+	}
+
+	// With a maxAge of 1ns the schema is immediately stale.
+	if !s.IsOutputSchemaStale(ctx, "aged-srv", "old_tool", time.Nanosecond) {
+		t.Error("IsOutputSchemaStale = false with maxAge=1ns — want true")
+	}
+}
+
+func TestIsOutputSchemaStale_MaxAgeZero_NeverStale(t *testing.T) {
+	t.Parallel()
+
+	s := newTestStore(t)
+	ctx := context.Background()
+	addServerForSchema(t, s, "zero-stale-srv")
+
+	if err := s.SaveOutputSchema(ctx, "zero-stale-srv", "my_tool", json.RawMessage(`{"type":"string"}`)); err != nil {
+		t.Fatalf("SaveOutputSchema: %v", err)
+	}
+
+	// maxAge = 0 → always returns false regardless of age.
+	if s.IsOutputSchemaStale(ctx, "zero-stale-srv", "my_tool", 0) {
+		t.Error("IsOutputSchemaStale = true with maxAge=0 — should always be false")
+	}
+}
+
+func TestIsOutputSchemaStale_MissingSchema_IsStale(t *testing.T) {
+	t.Parallel()
+
+	s := newTestStore(t)
+	ctx := context.Background()
+	addServerForSchema(t, s, "missing-stale-srv")
+
+	// No schema saved for this tool — missing means stale.
+	if !s.IsOutputSchemaStale(ctx, "missing-stale-srv", "nonexistent_tool", time.Hour) {
+		t.Error("IsOutputSchemaStale = false for missing schema — want true")
+	}
+}
+
+func TestRemoveServer_CascadeDeletesOutputSchemas(t *testing.T) {
+	t.Parallel()
+
+	s := newTestStore(t)
+	ctx := context.Background()
+
+	if err := s.AddServer(ctx, store.MCPServer{Name: "cascade-schema-srv", URL: "http://x"}); err != nil {
+		t.Fatalf("AddServer: %v", err)
+	}
+	if err := s.SaveOutputSchema(ctx, "cascade-schema-srv", "tool_a", json.RawMessage(`{"type":"string"}`)); err != nil {
+		t.Fatalf("SaveOutputSchema: %v", err)
+	}
+	if err := s.SaveOutputSchema(ctx, "cascade-schema-srv", "tool_b", json.RawMessage(`{"type":"number"}`)); err != nil {
+		t.Fatalf("SaveOutputSchema: %v", err)
+	}
+
+	// Verify schemas exist before removing the server.
+	before, _, err := s.GetAllOutputSchemas(ctx, "cascade-schema-srv", time.Hour)
+	if err != nil {
+		t.Fatalf("GetAllOutputSchemas before remove: %v", err)
+	}
+	if len(before) != 2 {
+		t.Fatalf("expected 2 schemas before remove, got %d", len(before))
+	}
+
+	if err := s.RemoveServer(ctx, "cascade-schema-srv"); err != nil {
+		t.Fatalf("RemoveServer: %v", err)
+	}
+
+	// Schemas should be gone via ON DELETE CASCADE (foreign_keys=ON is set in Open).
+	after, _, err := s.GetAllOutputSchemas(ctx, "cascade-schema-srv", time.Hour)
+	if err != nil {
+		t.Fatalf("GetAllOutputSchemas after remove: %v", err)
+	}
+	if len(after) != 0 {
+		t.Errorf("expected 0 schemas after server removed (CASCADE), got %d", len(after))
+	}
+}
+
+func TestSaveOutputSchema_MultipleToolsForSameServer(t *testing.T) {
+	t.Parallel()
+
+	s := newTestStore(t)
+	ctx := context.Background()
+	addServerForSchema(t, s, "multi-tool-srv")
+
+	toolSchemas := []struct {
+		tool   string
+		schema string
+	}{
+		{"alpha", `{"type":"string"}`},
+		{"beta", `{"type":"number"}`},
+		{"gamma", `{"type":"boolean"}`},
+	}
+	for _, tc := range toolSchemas {
+		if err := s.SaveOutputSchema(ctx, "multi-tool-srv", tc.tool, json.RawMessage(tc.schema)); err != nil {
+			t.Fatalf("SaveOutputSchema %q: %v", tc.tool, err)
+		}
+	}
+
+	schemas, _, err := s.GetAllOutputSchemas(ctx, "multi-tool-srv", time.Hour)
+	if err != nil {
+		t.Fatalf("GetAllOutputSchemas: %v", err)
+	}
+	if len(schemas) != 3 {
+		t.Fatalf("expected 3 schemas, got %d", len(schemas))
+	}
+	for _, tc := range toolSchemas {
+		got, ok := schemas[tc.tool]
+		if !ok {
+			t.Errorf("schema for %q missing", tc.tool)
+			continue
+		}
+		if string(got) != tc.schema {
+			t.Errorf("schemas[%q] = %s, want %s", tc.tool, string(got), tc.schema)
+		}
 	}
 }

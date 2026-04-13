@@ -52,7 +52,7 @@ func newTestServer(t *testing.T) *server.Server {
 	pool := newTestPool(t)
 	exec := executor.New(pool)
 
-	return server.New(reg, exec, server.Config{
+	return server.New(reg, exec, nil, server.Config{
 		SchemaThreshold: 20,
 		MaxToolCalls:    10,
 	})
@@ -225,7 +225,7 @@ func TestHandle_ToolsList_ExecuteCodeDescHasTypeDefsWhenBelowThreshold(t *testin
 	exec := executor.New(pool)
 
 	// SchemaThreshold = -1 → always inline full TypeScript defs.
-	srv := server.New(reg, exec, server.Config{SchemaThreshold: -1})
+	srv := server.New(reg, exec, nil, server.Config{SchemaThreshold: -1})
 
 	resp := handle(t, srv, `{"jsonrpc":"2.0","id":1,"method":"tools/list"}`)
 	result := resp["result"].(map[string]any)
@@ -263,7 +263,7 @@ func TestHandle_ToolsList_ExecuteCodeDescUseSummaryWhenAboveThreshold(t *testing
 	exec := executor.New(pool)
 
 	// SchemaThreshold = 0 → always search-first summary mode.
-	srv := server.New(reg, exec, server.Config{SchemaThreshold: 0})
+	srv := server.New(reg, exec, nil, server.Config{SchemaThreshold: 0})
 
 	resp := handle(t, srv, `{"jsonrpc":"2.0","id":1,"method":"tools/list"}`)
 	result := resp["result"].(map[string]any)
@@ -772,7 +772,7 @@ func TestHandle_ToolsCall_AddMCP_WithURL(t *testing.T) {
 
 	pool := newTestPool(t)
 	exec := executor.New(pool)
-	srv := server.New(reg, exec, server.Config{SchemaThreshold: 20})
+	srv := server.New(reg, exec, nil, server.Config{SchemaThreshold: 20})
 
 	msg := `{
 		"jsonrpc":"2.0","id":1,"method":"tools/call",
@@ -821,7 +821,7 @@ func TestHandle_ToolsCall_AddMCP_WithBearerAuth(t *testing.T) {
 
 	pool := newTestPool(t)
 	exec := executor.New(pool)
-	srv := server.New(reg, exec, server.Config{SchemaThreshold: 20})
+	srv := server.New(reg, exec, nil, server.Config{SchemaThreshold: 20})
 
 	msg := `{
 		"jsonrpc":"2.0","id":1,"method":"tools/call",
@@ -862,7 +862,7 @@ func TestHandle_ToolsCall_AddMCP_WithCustomHeader(t *testing.T) {
 
 	pool := newTestPool(t)
 	exec := executor.New(pool)
-	srv := server.New(reg, exec, server.Config{SchemaThreshold: 20})
+	srv := server.New(reg, exec, nil, server.Config{SchemaThreshold: 20})
 
 	msg := `{
 		"jsonrpc":"2.0","id":1,"method":"tools/call",
@@ -934,7 +934,7 @@ func TestHandle_ToolsCall_RemoveMCP_HappyPath(t *testing.T) {
 
 	pool := newTestPool(t)
 	exec := executor.New(pool)
-	srv := server.New(reg, exec, server.Config{SchemaThreshold: 20})
+	srv := server.New(reg, exec, nil, server.Config{SchemaThreshold: 20})
 
 	// First add it.
 	addMsg := `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"add_mcp","arguments":{"name":"todel","url":"` + upstream.URL + `"}}}`
@@ -1010,7 +1010,7 @@ func TestHandle_ToolsCall_Search_WithResults(t *testing.T) {
 
 	pool := newTestPool(t)
 	exec := executor.New(pool)
-	srv := server.New(reg, exec, server.Config{SchemaThreshold: 20})
+	srv := server.New(reg, exec, nil, server.Config{SchemaThreshold: 20})
 
 	resp := handle(t, srv, `{
 		"jsonrpc":"2.0","id":1,"method":"tools/call",
@@ -1065,7 +1065,7 @@ func TestHandle_ToolsCall_ListMCPs_WithServers(t *testing.T) {
 
 	pool := newTestPool(t)
 	exec := executor.New(pool)
-	srv := server.New(reg, exec, server.Config{SchemaThreshold: 20})
+	srv := server.New(reg, exec, nil, server.Config{SchemaThreshold: 20})
 
 	resp := handle(t, srv, `{
 		"jsonrpc":"2.0","id":1,"method":"tools/call",
@@ -1102,7 +1102,7 @@ func TestHandle_ExecuteCode_WithToolCall(t *testing.T) {
 
 	pool := newTestPool(t)
 	exec := executor.New(pool)
-	srv := server.New(reg, exec, server.Config{SchemaThreshold: 20, MaxToolCalls: 5})
+	srv := server.New(reg, exec, nil, server.Config{SchemaThreshold: 20, MaxToolCalls: 5})
 
 	resp := handle(t, srv, `{
 		"jsonrpc":"2.0","id":1,"method":"tools/call",

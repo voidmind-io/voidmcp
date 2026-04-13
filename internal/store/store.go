@@ -45,6 +45,15 @@ CREATE TABLE IF NOT EXISTS tool_cache (
     tools_json  TEXT NOT NULL,
     fetched_at  TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
+
+CREATE TABLE IF NOT EXISTS output_schemas (
+    server_name TEXT NOT NULL,
+    tool_name   TEXT NOT NULL,
+    schema_json TEXT NOT NULL,
+    inferred_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (server_name, tool_name),
+    FOREIGN KEY (server_name) REFERENCES mcp_servers(name) ON DELETE CASCADE
+);
 `
 
 // Store is the voidmcp configuration store. It wraps a SQLite database and an
@@ -290,6 +299,70 @@ func (s *Store) ClearCache(ctx context.Context, serverName string) error {
 		return fmt.Errorf("store: clear cache for %q: %w", serverName, err)
 	}
 	return nil
+}
+
+// SaveOutputSchema stores or updates the inferred output schema for a tool.
+func (s *Store) SaveOutputSchema(ctx context.Context, serverName, toolName string, schema json.RawMessage) error {
+	_, err := s.db.ExecContext(ctx,
+		`INSERT INTO output_schemas (server_name, tool_name, schema_json, inferred_at)
+		 VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+		 ON CONFLICT(server_name, tool_name) DO UPDATE SET
+		     schema_json = excluded.schema_json,
+		     inferred_at = excluded.inferred_at`,
+		serverName, toolName, string(schema),
+	)
+	if err != nil {
+		return fmt.Errorf("store: save output schema %q/%q: %w", serverName, toolName, err)
+	}
+	return nil
+}
+
+// GetAllOutputSchemas returns all output schemas for a server.
+// Always returns whatever is in the DB (never hides expired schemas).
+// The staleTools slice lists tools whose inferred_at is older than maxAge.
+// When maxAge is zero, no tools are considered stale.
+func (s *Store) GetAllOutputSchemas(ctx context.Context, serverName string, maxAge time.Duration) (schemas map[string]json.RawMessage, staleTools []string, err error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT tool_name, schema_json, inferred_at FROM output_schemas WHERE server_name = ?`,
+		serverName,
+	)
+	if err != nil {
+		return nil, nil, fmt.Errorf("store: get output schemas for %q: %w", serverName, err)
+	}
+	defer rows.Close()
+
+	schemas = make(map[string]json.RawMessage)
+	now := time.Now()
+	for rows.Next() {
+		var toolName, schemaJSON, inferredAtStr string
+		if err := rows.Scan(&toolName, &schemaJSON, &inferredAtStr); err != nil {
+			return nil, nil, fmt.Errorf("store: get output schemas for %q: scan: %w", serverName, err)
+		}
+		schemas[toolName] = json.RawMessage(schemaJSON)
+		inferredAt, _ := time.Parse("2006-01-02 15:04:05", inferredAtStr)
+		if maxAge > 0 && now.Sub(inferredAt) > maxAge {
+			staleTools = append(staleTools, toolName)
+		}
+	}
+	return schemas, staleTools, rows.Err()
+}
+
+// IsOutputSchemaStale reports whether the stored schema for the named tool is
+// missing or older than maxAge. When maxAge is zero it always returns false.
+func (s *Store) IsOutputSchemaStale(ctx context.Context, serverName, toolName string, maxAge time.Duration) bool {
+	if maxAge == 0 {
+		return false
+	}
+	var inferredAtStr string
+	err := s.db.QueryRowContext(ctx,
+		`SELECT inferred_at FROM output_schemas WHERE server_name = ? AND tool_name = ?`,
+		serverName, toolName,
+	).Scan(&inferredAtStr)
+	if err != nil {
+		return true // missing = stale
+	}
+	inferredAt, _ := time.Parse("2006-01-02 15:04:05", inferredAtStr)
+	return time.Since(inferredAt) > maxAge
 }
 
 // serverAAD returns the additional authenticated data bound to a server's

@@ -59,6 +59,11 @@ type ExecuteParams struct {
 	// MaxToolCalls limits the total number of tool calls allowed per execution.
 	// Zero means no limit.
 	MaxToolCalls int
+	// OnToolResult is an optional hook called after each successful tool call
+	// with the unwrapped result. It is invoked in a separate goroutine and must
+	// not block. serverName and toolName identify the tool; result is the
+	// unwrapped JSON payload.
+	OnToolResult func(serverName, toolName string, result json.RawMessage)
 }
 
 // ExecuteResult holds the output of a script execution.
@@ -226,7 +231,20 @@ func (e *Executor) Execute(ctx context.Context, params ExecuteParams) (res *Exec
 			this.Promise().Reject(qctx.ThrowError(callErr))
 			return
 		}
-		this.Promise().Resolve(qctx.ParseJSON(string(callResult)))
+
+		// Unwrap MCP ToolResult wrapper before passing result to JS.
+		unwrapped := unwrapToolResult(callResult)
+
+		// Fire schema capture hook asynchronously so it never blocks the JS event loop.
+		// Cap captured response size to prevent OOM from huge MCP responses.
+		const maxCaptureSize = 1 << 20 // 1 MB
+		if params.OnToolResult != nil && len(unwrapped) <= maxCaptureSize {
+			captured := make(json.RawMessage, len(unwrapped))
+			copy(captured, unwrapped)
+			go params.OnToolResult(entry.server, entry.tool, captured)
+		}
+
+		this.Promise().Resolve(qctx.ParseJSON(string(unwrapped)))
 	})
 
 	proxyPreamble := buildProxyPreamble(params.ServerTools, bridgeName)

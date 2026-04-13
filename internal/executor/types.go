@@ -1,6 +1,7 @@
 package executor
 
 import (
+	"encoding/json"
 	"fmt"
 	"sort"
 	"strings"
@@ -11,6 +12,11 @@ import (
 // GenerateTypeDefs produces TypeScript namespace declarations for all tools in
 // serverTools. The output is embedded in the execute_code tool description so
 // an LLM can infer correct call syntax and argument shapes.
+//
+// outputSchemas maps server alias to a map of tool name to inferred JSON
+// Schema. When a schema is available for a tool its Promise return type is
+// replaced with the inferred TypeScript type instead of Promise<any>.
+// Pass nil or an empty map when no schemas are available.
 //
 // Each server name becomes a namespace under the global tools object:
 //
@@ -25,7 +31,7 @@ import (
 //
 // Servers and tools are sorted alphabetically for deterministic output.
 // Returns an empty string when serverTools is empty.
-func GenerateTypeDefs(serverTools map[string][]protocol.Tool) string {
+func GenerateTypeDefs(serverTools map[string][]protocol.Tool, outputSchemas map[string]map[string]json.RawMessage) string {
 	if len(serverTools) == 0 {
 		return ""
 	}
@@ -42,6 +48,7 @@ func GenerateTypeDefs(serverTools map[string][]protocol.Tool) string {
 			sb.WriteByte('\n')
 		}
 
+		alias := server
 		if isValidJSIdent(server) {
 			sb.WriteString("declare namespace tools.")
 			sb.WriteString(server)
@@ -58,7 +65,13 @@ func GenerateTypeDefs(serverTools map[string][]protocol.Tool) string {
 
 		sorted := sortedTools(tools)
 		for _, t := range sorted {
-			writeToolDecl(&sb, t)
+			var outSchema json.RawMessage
+			if outputSchemas != nil {
+				if schemas, ok := outputSchemas[alias]; ok {
+					outSchema = schemas[t.Name]
+				}
+			}
+			writeToolDecl(&sb, t, outSchema)
 		}
 
 		sb.WriteString("}")
@@ -115,7 +128,9 @@ func GenerateServerSummaries(serverTools map[string][]protocol.Tool) string {
 }
 
 // writeToolDecl writes a single TypeScript function declaration into sb.
-func writeToolDecl(sb *strings.Builder, tool protocol.Tool) {
+// outSchema is an optional inferred JSON Schema for the return type; when nil
+// the return type falls back to Promise<any>.
+func writeToolDecl(sb *strings.Builder, tool protocol.Tool, outSchema json.RawMessage) {
 	if !isValidJSIdent(tool.Name) {
 		// Emit a comment — the LLM knows the tool exists but cannot call it
 		// via dot-notation syntax.
@@ -165,7 +180,70 @@ func writeToolDecl(sb *strings.Builder, tool protocol.Tool) {
 		sb.WriteString("  ")
 	}
 
-	sb.WriteString("}): Promise<any>;\n")
+	if outSchema != nil {
+		sb.WriteString("}): Promise<" + schemaToTypeScript(outSchema) + ">;\n")
+	} else {
+		sb.WriteString("}): Promise<any>;\n")
+	}
+}
+
+// schemaToTypeScript converts an inferred JSON-Schema-like object to a
+// TypeScript type string.
+func schemaToTypeScript(schema json.RawMessage) string {
+	var s map[string]any
+	if err := json.Unmarshal(schema, &s); err != nil {
+		return "any"
+	}
+	return schemaTypeToTS(s)
+}
+
+// schemaTypeToTS recursively maps a parsed JSON Schema map to a TypeScript
+// type string.
+func schemaTypeToTS(s map[string]any) string {
+	typ, _ := s["type"].(string)
+	switch typ {
+	case "string":
+		return "string"
+	case "number":
+		return "number"
+	case "boolean":
+		return "boolean"
+	case "array":
+		items, ok := s["items"].(map[string]any)
+		if !ok {
+			return "any[]"
+		}
+		return "Array<" + schemaTypeToTS(items) + ">"
+	case "object":
+		props, ok := s["properties"].(map[string]any)
+		if !ok || len(props) == 0 {
+			return "Record<string, any>"
+		}
+		// Sort keys for deterministic output.
+		keys := make([]string, 0, len(props))
+		for k := range props {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+
+		var sb strings.Builder
+		sb.WriteString("{ ")
+		for i, k := range keys {
+			if i > 0 {
+				sb.WriteString("; ")
+			}
+			propSchema, ok := props[k].(map[string]any)
+			if !ok {
+				sb.WriteString(k + ": any")
+			} else {
+				sb.WriteString(k + ": " + schemaTypeToTS(propSchema))
+			}
+		}
+		sb.WriteString(" }")
+		return sb.String()
+	default:
+		return "any"
+	}
 }
 
 // tsType maps a JSON Schema Property to the corresponding TypeScript type
