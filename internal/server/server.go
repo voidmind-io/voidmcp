@@ -210,21 +210,29 @@ func (s *Server) buildToolList() []protocol.Tool {
 	allTools := s.registry.AllTools()
 	totalCount := s.registry.TotalToolCount()
 
+	const codeIntro = "Execute JavaScript that chains multiple MCP tool calls in a single turn. " +
+		"Use this instead of calling tools individually - pass output from one tool as input to the next. " +
+		"All calls return Promises (use await). Tool results are plain objects you can destructure and pass along.\n\n" +
+		"Example:\n" +
+		"```js\n" +
+		"const results = await tools.server1.search({ query: \"...\" });\n" +
+		"const detail = await tools.server1.get_item({ id: results[0].id });\n" +
+		"await tools.server2.create({ title: detail.name, content: detail.body });\n" +
+		"return { created: true, source: detail.name };\n" +
+		"```"
+
 	var codeDesc string
 	if s.cfg.SchemaThreshold < 0 || (s.cfg.SchemaThreshold > 0 && totalCount <= s.cfg.SchemaThreshold) {
 		typeDefs := executor.GenerateTypeDefs(allTools)
-		codeDesc = "Execute JavaScript in a WASM sandbox. " +
-			"Use `tools.serverName.toolName(args)` to call MCP tools. " +
-			"All calls return Promises (use await)."
+		codeDesc = codeIntro
 		if typeDefs != "" {
 			codeDesc += "\n\n" + typeDefs
 		}
 	} else {
 		summaries := executor.GenerateServerSummaries(allTools)
-		codeDesc = fmt.Sprintf(
-			"Execute JavaScript in a WASM sandbox. "+
-				"%d tools across %d servers. "+
-				"Use search(\"your goal\") to find specific tools, then execute_code to call them.",
+		codeDesc = codeIntro + fmt.Sprintf(
+			"\n\n%d tools across %d servers. "+
+				"Use search(\"your goal\") to find specific tools first.",
 			totalCount, len(allTools),
 		)
 		if summaries != "" {
