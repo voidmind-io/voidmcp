@@ -496,9 +496,20 @@ func (s *Server) handleSearch(_ context.Context, raw json.RawMessage) *protocol.
 		matched[r.ServerName] = append(matched[r.ServerName], r.Tool)
 	}
 
+	// Load inferred output schemas so search results show typed returns.
+	outputSchemas := make(map[string]map[string]json.RawMessage)
+	if s.store != nil {
+		for serverName := range matched {
+			schemas, _, _ := s.store.GetAllOutputSchemas(context.Background(), serverName, s.cfg.SchemaTTL)
+			if len(schemas) > 0 {
+				outputSchemas[serverName] = schemas
+			}
+		}
+	}
+
 	var sb strings.Builder
 	fmt.Fprintf(&sb, "Found %d tool(s) matching %q:\n\n", len(results), args.Query)
-	sb.WriteString(executor.GenerateTypeDefs(matched, nil))
+	sb.WriteString(executor.GenerateTypeDefs(matched, outputSchemas))
 	return protocol.TextResult(sb.String())
 }
 

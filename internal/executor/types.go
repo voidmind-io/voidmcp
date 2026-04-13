@@ -181,7 +181,7 @@ func writeToolDecl(sb *strings.Builder, tool protocol.Tool, outSchema json.RawMe
 	}
 
 	if outSchema != nil {
-		sb.WriteString("}): Promise<" + schemaToTypeScript(outSchema) + ">;\n")
+		sb.WriteString("}): Promise<" + schemaToTypeScript(outSchema) + ">; // inferred - could depend on previous query\n")
 	} else {
 		sb.WriteString("}): Promise<any>;\n")
 	}
