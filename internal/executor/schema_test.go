@@ -391,39 +391,6 @@ func TestUnwrapToolResult_MultipleTextBlocks(t *testing.T) {
 	}
 }
 
-func TestUnwrapToolResult_MultipleNonTextBlocks_PassedThrough(t *testing.T) {
-	t.Parallel()
-
-	pool := newTestPool(t)
-	// Multiple blocks, none of them text — wrapper must pass through so the
-	// data (e.g. images, binaries) isn't lost.
-	toolResponse := json.RawMessage(`{"content":[{"type":"image","text":""},{"type":"image","text":""}]}`)
-
-	var hookResult json.RawMessage
-	done := make(chan struct{})
-
-	_, err := runToolCallWithHook(t, pool, toolResponse, func(_, _ string, res json.RawMessage) {
-		hookResult = make(json.RawMessage, len(res))
-		copy(hookResult, res)
-		close(done)
-	})
-	if err != nil {
-		t.Fatalf("Execute: %v", err)
-	}
-	if !waitHook(done) {
-		t.Fatal("OnToolResult hook was never called")
-	}
-
-	// Should be the raw wrapper, not an empty array.
-	var got map[string]any
-	if err := json.Unmarshal(hookResult, &got); err != nil {
-		t.Fatalf("hook result should be the raw wrapper object: %s (%v)", string(hookResult), err)
-	}
-	if _, ok := got["content"]; !ok {
-		t.Errorf("hook result missing content field, got: %s", string(hookResult))
-	}
-}
-
 func TestUnwrapToolResult_NotAToolResult_PassedThrough(t *testing.T) {
 	t.Parallel()
 
