@@ -109,6 +109,11 @@ func unwrapToolResult(raw json.RawMessage) json.RawMessage {
 			texts = append(texts, c.Text)
 		}
 	}
+	if len(texts) == 0 {
+		// All blocks are non-text (images, binaries). Collapsing to [] would
+		// drop the data; return the wrapper untouched so callers still see it.
+		return raw
+	}
 	out, _ := json.Marshal(texts)
 	return json.RawMessage(out)
 }
